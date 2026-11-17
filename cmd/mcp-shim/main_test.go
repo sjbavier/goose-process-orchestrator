@@ -163,7 +163,7 @@ func TestOrchestratorFlagsArgsCarriesRetentionFlags(t *testing.T) {
 }
 
 // TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults proves a
-// shim invoked with none of the three mailbox/ceiling flags set still
+// shim invoked with none of the four mailbox/ceiling/workdir flags set still
 // forwards them, at values matching the orchestrator binary's own defaults —
 // behaviorally equivalent to today, never silently omitted.
 func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults(t *testing.T) {
@@ -177,6 +177,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults(t *testing
 		"--mailbox-extension-binary": "",
 		"--mailbox-socket":           "mailbox.sock",
 		"--max-turns-ceiling":        "200",
+		"--workdir":                  "",
 	}
 	for flag, value := range want {
 		found := false
@@ -195,7 +196,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults(t *testing
 }
 
 // TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit proves a
-// shim invoked with the three mailbox/ceiling flags set forwards the exact
+// shim invoked with the four mailbox/ceiling/workdir flags set forwards the exact
 // given values, mirroring the retention-flag test's assertion shape.
 func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit(t *testing.T) {
 	f := orchestratorFlags{
@@ -204,12 +205,14 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit(t *testing.T
 		mailboxExtensionBinary: "/usr/local/bin/mailbox-extension",
 		mailboxSocket:          "custom-mailbox.sock",
 		maxTurnsCeiling:        500,
+		workdir:                "/home/you/project",
 	}
 	args := f.args()
 	want := map[string]string{
 		"--mailbox-extension-binary": "/usr/local/bin/mailbox-extension",
 		"--mailbox-socket":           "custom-mailbox.sock",
 		"--max-turns-ceiling":        "500",
+		"--workdir":                  "/home/you/project",
 	}
 	for flag, value := range want {
 		found := false

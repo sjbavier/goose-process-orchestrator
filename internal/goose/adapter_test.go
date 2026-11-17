@@ -134,6 +134,56 @@ func TestBuildAttachesMailboxExtensionOnlyWhenFullyConfigured(t *testing.T) {
 	})
 }
 
+// TestBuildWorkdirOverridesChildDirOnlyWhenSet is the regression lock for the
+// --workdir feature: an unset Config.Workdir must leave Dir exactly at the
+// task's own RunDir (today's behavior), a set one must override Dir to the
+// resolved absolute workdir, and a configured-but-missing directory must
+// fail closed rather than silently falling back to RunDir.
+func TestBuildWorkdirOverridesChildDirOnlyWhenSet(t *testing.T) {
+	root := t.TempDir()
+	recipe := filepath.Join(root, "safe.yaml")
+	if e := os.WriteFile(recipe, []byte("x"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	run := t.TempDir()
+	wantRun, e := filepath.Abs(run)
+	if e != nil {
+		t.Fatal(e)
+	}
+
+	t.Run("unset leaves Dir at RunDir", func(t *testing.T) {
+		l, err := (Config{RecipeRoot: root, MaxTurns: 25}).Build(Request{Recipe: recipe, RunDir: run})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Dir != wantRun {
+			t.Fatalf("Dir changed with Workdir unset: got %q, want %q", l.Dir, wantRun)
+		}
+	})
+
+	t.Run("set overrides Dir to the resolved workdir", func(t *testing.T) {
+		workdir := t.TempDir()
+		wantWorkdir, err := filepath.Abs(workdir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := (Config{RecipeRoot: root, MaxTurns: 25, Workdir: workdir}).Build(Request{Recipe: recipe, RunDir: run})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Dir != wantWorkdir {
+			t.Fatalf("Dir with Workdir set: got %q, want %q", l.Dir, wantWorkdir)
+		}
+	})
+
+	t.Run("nonexistent workdir fails closed", func(t *testing.T) {
+		_, err := (Config{RecipeRoot: root, MaxTurns: 25, Workdir: filepath.Join(root, "does-not-exist")}).Build(Request{Recipe: recipe, RunDir: run})
+		if err == nil {
+			t.Fatal("expected an error for a nonexistent workdir, got nil")
+		}
+	})
+}
+
 func TestBuildMaxTurnsDefaultAndPerRequestOverride(t *testing.T) {
 	root := t.TempDir()
 	recipe := filepath.Join(root, "safe.yaml")

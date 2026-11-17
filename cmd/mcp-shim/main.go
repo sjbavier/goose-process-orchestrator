@@ -33,6 +33,7 @@ func main() {
 	mailboxExtensionBinary := flag.String("mailbox-extension-binary", "", "path to the mailbox-extension binary, forwarded to an auto-started orchestrator; empty (the default) leaves the mailbox feature entirely disabled")
 	mailboxSocket := flag.String("mailbox-socket", "mailbox.sock", "local Unix domain socket path the mailbox server listens on, forwarded to an auto-started orchestrator")
 	maxTurnsCeiling := flag.Int("max-turns-ceiling", 200, "hard cap on a spawn's max_turns input, forwarded to an auto-started orchestrator")
+	workdir := flag.String("workdir", "", "override the spawned goose run child's working directory, forwarded to an auto-started orchestrator; empty (the default) leaves it at the task's own isolated run directory")
 	flag.Parse()
 
 	if *socket == "" {
@@ -61,6 +62,7 @@ func main() {
 		mailboxExtensionBinary: *mailboxExtensionBinary,
 		mailboxSocket:          *mailboxSocket,
 		maxTurnsCeiling:        *maxTurnsCeiling,
+		workdir:                *workdir,
 	}
 	if err := run(*socket, *orchestratorBinary, forwarded); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -78,6 +80,7 @@ type orchestratorFlags struct {
 	runsMaxCount                             int
 	mailboxExtensionBinary, mailboxSocket    string
 	maxTurnsCeiling                          int
+	workdir                                  string
 }
 
 func run(socket, orchestratorBinary string, forwarded orchestratorFlags) error {
@@ -157,6 +160,7 @@ func (f orchestratorFlags) args() []string {
 		"--mailbox-extension-binary", f.mailboxExtensionBinary,
 		"--mailbox-socket", f.mailboxSocket,
 		"--max-turns-ceiling", strconv.Itoa(f.maxTurnsCeiling),
+		"--workdir", f.workdir,
 	}
 }
 

@@ -701,6 +701,7 @@ func TestRetentionFlagValidationRejectsBadInput(t *testing.T) {
 		{"non-positive interval with count set", []string{"--runs-max-count=5", "--runs-sweep-interval=-1s"}, "--runs-sweep-interval must be positive"},
 		{"missing mailbox extension binary", []string{"--mailbox-extension-binary=/does/not/exist"}, "is not an accessible regular file"},
 		{"empty mailbox socket with extension binary set", []string{"--mailbox-extension-binary=" + orch, "--mailbox-socket="}, "--mailbox-socket cannot be empty"},
+		{"missing workdir", []string{"--workdir=/does/not/exist"}, "is not an accessible directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(orch, tc.args...)

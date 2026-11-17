@@ -5,7 +5,7 @@
 ## Provenance and selected idea
 
 - **Selected idea:** Goose Process Orchestrator — a durable MCP task server that launches Goose recipes as independently supervised operating-system processes.
-- **Ideation artifact:** `/home/b4v1n4t0r/Projects/goose-mcp-orchestrator-plan.md` (source implementation blueprint, retained outside this repository).
+- **Ideation artifact:** a local implementation blueprint document, retained outside this repository and not part of its public history.
 - **Project slug:** `goose-process-orchestrator`.
 - **Initial feature slug:** `phase-0-phase-1-local-mvp`.
 - **Intended first artifact:** a Go repository scaffold with a tested lifecycle model and verified `gen-plan` handoff; it is deliberately not a production process launcher.

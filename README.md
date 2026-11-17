@@ -86,6 +86,8 @@ go run ./cmd/orchestrator --listen /path/to/orchestrator.sock \
 
 `--max-turns-ceiling` (default `200`) is a hard cap on any single `spawn`'s `max_turns` input, regardless of what a client requests.
 
+`--workdir` (default empty) overrides every spawned `goose run` child's working directory, which otherwise defaults to the task's own isolated run directory under `--runs-dir`. This matters for a recipe authored to assume a real project checkout as its cwd (relative paths like `./src/...` or `.config/...`); set `--workdir /path/to/that/checkout` so every spawn runs there instead. Only the child's cwd changes — `logs`/`progress`/retention still use the task's own run directory for captured `stdout`/`stderr`, since those paths are already absolute. Validated at startup (must be an accessible directory) the same way `--mailbox-extension-binary` is, so a bad path fails before any task is ever accepted. Leaving it empty keeps today's exact behavior.
+
 Use an absolute or otherwise operator-controlled `--db` path when the caller
 needs to retain local task records. The database is local state, not a shared
 service: do not point concurrent unrelated operators at the same file without
@@ -347,7 +349,7 @@ go build -o orchestrator ./cmd/orchestrator
 
 `--max-concurrent`/`--max-turns`/`--runs-max-age`/`--runs-max-count`/`--runs-sweep-interval` here are only forwarded to the orchestrator the shim auto-starts; they have no effect when the shim just dials an already-running orchestrator (that orchestrator's own values, from whichever invocation actually started it, apply).
 
-The shim also forwards `--mailbox-extension-binary`, `--mailbox-socket`, and `--max-turns-ceiling` to any orchestrator it auto-starts, unconditionally, with defaults (`""`, `"mailbox.sock"`, `200`) matching `cmd/orchestrator`'s own — so an orchestrator the shim auto-starts behaves the same as one started directly with no flags. Pass the shim its own `--mailbox-extension-binary`/`--mailbox-socket`/`--max-turns-ceiling` flags to change what it forwards.
+The shim also forwards `--mailbox-extension-binary`, `--mailbox-socket`, `--max-turns-ceiling`, and `--workdir` to any orchestrator it auto-starts, unconditionally, with defaults (`""`, `"mailbox.sock"`, `200`, `""`) matching `cmd/orchestrator`'s own — so an orchestrator the shim auto-starts behaves the same as one started directly with no flags. Pass the shim its own `--mailbox-extension-binary`/`--mailbox-socket`/`--max-turns-ceiling`/`--workdir` flags to change what it forwards.
 
 The client's actual stdio child is `mcp-shim`, not `orchestrator`. The first
 client to connect through the shim causes an orchestrator to auto-start; every

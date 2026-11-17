@@ -34,6 +34,13 @@ type Config struct {
 	// byte-identical regardless of what a request carries (Selection 1, A-A).
 	ExtensionBinary string
 	MailboxSocket   string
+	// Workdir, when non-empty, overrides the spawned process's working
+	// directory, which otherwise defaults to the task's own isolated run
+	// directory (RunDir). This only affects cwd: stdout/stderr capture paths
+	// come from Artifacts.Create and are already absolute, so they are
+	// unaffected either way. Empty (the common case) keeps today's exact
+	// behavior.
+	Workdir string
 }
 type Request struct {
 	Recipe     string
@@ -93,9 +100,21 @@ func (c Config) Build(r Request) (Launch, error) {
 	if err != nil || !info.IsDir() {
 		return Launch{}, errors.New("run directory is not a directory")
 	}
+	childDir := runDir
+	if c.Workdir != "" {
+		workdir, err := filepath.Abs(c.Workdir)
+		if err != nil {
+			return Launch{}, err
+		}
+		info, err := os.Stat(workdir)
+		if err != nil || !info.IsDir() {
+			return Launch{}, errors.New("workdir is not a directory")
+		}
+		childDir = workdir
+	}
 	args := []string{"run", "--recipe", recipe, "--no-session", "--max-turns", fmt.Sprint(c.MaxTurns), "--quiet", "--output-format", "stream-json"}
 	args = append(args, parameterArgs(r.Parameters)...)
-	launch := Launch{Binary: c.Binary, Dir: runDir, Args: args}
+	launch := Launch{Binary: c.Binary, Dir: childDir, Args: args}
 	// Both Config fields and the request's token must be present: a token
 	// with no configured extension/socket (should not happen, but fail
 	// closed rather than attach nothing yet still leak an unused env var)

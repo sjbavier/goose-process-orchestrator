@@ -42,6 +42,7 @@ func main() {
 	runsSweepInterval := flag.Duration("runs-sweep-interval", 15*time.Minute, "how often to apply --runs-max-age/--runs-max-count; only used when one of them is set")
 	mailboxExtensionBinary := flag.String("mailbox-extension-binary", "", "path to the mailbox-extension binary; empty (the default) leaves the mailbox feature entirely disabled, with spawned-recipe argv/env unchanged")
 	mailboxSocket := flag.String("mailbox-socket", "mailbox.sock", "local Unix domain socket path the mailbox server listens on; only used when --mailbox-extension-binary is set")
+	workdir := flag.String("workdir", "", "override the spawned goose run child's working directory; empty (the default) uses the task's own isolated run directory under --runs-dir, unchanged from today")
 	flag.Parse()
 	if *mcpStdio && *listen != "" {
 		fmt.Fprintln(os.Stderr, "--mcp-stdio and --listen are mutually exclusive")
@@ -79,6 +80,14 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if *workdir != "" {
+		// Fail closed before any task is ever accepted, same as the
+		// mailbox-extension-binary check above.
+		if info, err := os.Stat(*workdir); err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "--workdir %q is not an accessible directory: %v\n", *workdir, err)
+			os.Exit(1)
+		}
+	}
 	config := serverConfig{
 		dbPath:                 *dbPath,
 		recipeRoot:             *recipeRoot,
@@ -91,6 +100,7 @@ func main() {
 		sweepInterval:          *runsSweepInterval,
 		mailboxExtensionBinary: *mailboxExtensionBinary,
 		mailboxSocket:          *mailboxSocket,
+		workdir:                *workdir,
 	}
 	// The interval only matters once a limit is configured; requiring it to be
 	// positive unconditionally would reject an invocation that never sweeps.
@@ -160,6 +170,11 @@ type serverConfig struct {
 	// every spawned recipe's argv/env is exactly as before this feature
 	// existed.
 	mailboxExtensionBinary, mailboxSocket string
+	// workdir, when non-empty, overrides every spawned goose run child's
+	// working directory. Left empty (the default), a spawned process's cwd
+	// stays its own isolated run directory, exactly as before this feature
+	// existed.
+	workdir string
 }
 
 // newServer constructs the service/scheduler/store exactly once and wraps it
@@ -200,7 +215,7 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 		return nil, nil, nil, nil, fmt.Errorf("initialize local task storage: %w", err)
 	}
 	store := tasks.NewStore(db)
-	launcherConfig := goose.Config{Binary: config.gooseBinary, RecipeRoot: config.recipeRoot, MaxTurns: config.maxTurns, MaxTurnsCeiling: config.maxTurnsCeiling}
+	launcherConfig := goose.Config{Binary: config.gooseBinary, RecipeRoot: config.recipeRoot, MaxTurns: config.maxTurns, MaxTurnsCeiling: config.maxTurnsCeiling, Workdir: config.workdir}
 	// startMailbox stays a no-op unless the mailbox feature is enabled below,
 	// so every existing caller/config keeps today's exact behavior.
 	startMailbox = func(context.Context) {}

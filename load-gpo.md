@@ -1,13 +1,16 @@
 Upgrade and verify the "Goose Process Orchestrator" extension after a code update.
 
 Context: the extension's binaries at ~/.local/bin/goose-orchestrator and
-~/.local/bin/goose-mcp-shim are stale — they predate several merged features
-(recipe parameters, a documented decision against native session resume,
-run-directory retention, persisted-PID restart reconciliation, and the
-per-task message mailbox with its `send_message` tool). The extension's
-config entry in `goose info`'s reported Config yaml already points at the
-right paths; nothing there needs to change. The source is at
-~/Projects/goose-process-orchestrator on main (commit 7d7299b or later).
+~/.local/bin/goose-mcp-shim may be stale relative to the repo's main branch.
+Before rebuilding, check what's actually new since these binaries were last
+built (`git log --oneline <old-build-commit>..main` in the repo, if you know
+it) so step 4 below can be adjusted for whatever that upgrade actually adds —
+this file's own checklist reflects the project as of the per-task mailbox,
+`inbox_policy`, and `--workdir` features; if main has moved further, treat
+that checklist as a floor, not a ceiling. The extension's config entry in
+`goose info`'s reported Config yaml already points at the right paths;
+nothing there needs to change. The source is at
+~/Projects/goose-process-orchestrator on main.
 
 1. Rebuild the binaries from that repo:
      cd ~/Projects/goose-process-orchestrator
@@ -51,16 +54,25 @@ right paths; nothing there needs to change. The source is at
      reads it unless the mailbox is enabled and the recipe calls
      `read_inbox`. Also confirm `send_message` on an unknown task ID
      returns a clear error.
+   - `spawn` once with `inbox_policy: "open"` and confirm it's accepted;
+     `spawn` once with an invalid value (e.g. `"bogus"`) and confirm it's
+     rejected with a clear error and queues nothing. Omitting it entirely
+     should behave exactly as before (default `controller_only`).
    - Report back what each call returned.
 
 Do not add, remove, or edit the extension's config entry — only rebuild
 the binaries and restart the running processes. Don't touch anything
 under the repo's own .goose/workflows/ directory.
 
-Note — the mailbox is optional and NOT enabled by this upgrade. The shim
-does not forward the mailbox flags, so enabling it means starting
-`goose-orchestrator --listen <the shim's socket>` yourself with
-`--mailbox-extension-binary ~/.local/bin/goose-mailbox-extension` and
-`--mailbox-socket <path>` before any shim connects (see
-docs/goose-extension-setup.md, step 6). Do not do that as part of this
-upgrade unless explicitly asked.
+Note — the mailbox is optional and NOT enabled by this upgrade. The shim does
+forward `--mailbox-extension-binary`/`--mailbox-socket` to an orchestrator it
+auto-starts, so enabling it only needs those two flags added to the shim's
+own `args` in the extension config (see docs/goose-extension-setup.md, step
+6) — it does not require starting the orchestrator by hand. Do not add them
+as part of this upgrade unless explicitly asked.
+
+Note — `--workdir` (shim and orchestrator) is also new and optional: it
+overrides a spawned recipe's working directory, which otherwise defaults to
+the task's own isolated run directory. Leaving it unset keeps today's exact
+behavior; only add it to the extension config if a recipe actually needs to
+run from a real project checkout instead of its isolated run directory.
