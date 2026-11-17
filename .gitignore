@@ -1,0 +1,24 @@
+# Build and test outputs
+/bin/
+*.test
+*.out
+coverage.out
+
+# Local runtime state and secrets
+.env
+.env.*
+!.env.example
+var/
+runs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+
+# ai artifacts
+.claude
+.goose

@@ -1,0 +1,6 @@
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"A"}],"metadata":{"inference":{"provider":"chatgpt_codex","requestedModel":"gpt-test"}}}}
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"B"}],"metadata":{"inference":{"provider":"chatgpt_codex","requestedModel":"gpt-test"}}}}
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"C"}],"metadata":{"inference":{"provider":"chatgpt_codex","requestedModel":"gpt-test"}}}}
+{"type":"message","message":{"id":"resp_2","role":"assistant","created":2,"content":[{"type":"text","text":"D"}],"metadata":{"inference":{"provider":"chatgpt_codex","requestedModel":"gpt-test"}}}}
+{"type":"message","message":{"id":"resp_2","role":"assistant","created":2,"content":[{"type":"text","text":"E"}],"metadata":{"inference":{"provider":"chatgpt_codex","requestedModel":"gpt-test"}}}}
+{"type":"complete","total_tokens":5052,"input_tokens":5040,"output_tokens":12,"cache_read_input_tokens":0,"cache_write_input_tokens":0,"cost_usd":0.010224}

@@ -1,0 +1,2 @@
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"still "}],"metadata":{"inference":{"provider":"anthropic","requestedModel":"claude-test-1"}}}}
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"working"}],"metadata":{"inference":{"provider":"anthropic","requestedModel":"claude-test-1"}}}}

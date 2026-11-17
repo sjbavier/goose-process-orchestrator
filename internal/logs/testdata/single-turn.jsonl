@@ -1,0 +1,2 @@
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1793572384,"content":[{"type":"text","text":"Hello, world."}],"metadata":{"userVisible":true,"agentVisible":true,"inference":{"provider":"anthropic","requestedModel":"claude-test-1"}}}}
+{"type":"complete","total_tokens":120,"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":0,"cache_write_input_tokens":0,"cost_usd":0.00042}

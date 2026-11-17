@@ -1,0 +1,11 @@
+-- Forward-only: add the declared recipe parameter map to the task audit record.
+-- Never edit an applied migration.
+--
+-- The value is the deterministic JSON canonical encoding produced by
+-- tasks.CanonicalParameters. The empty string means "no parameters", so every
+-- row created before this migration remains idempotency-equivalent to a new
+-- request that passes no parameters.
+--
+-- Parameters are durable local audit data and may also appear in run
+-- artifacts. Never pass secrets as recipe parameters.
+ALTER TABLE tasks ADD COLUMN parameters TEXT NOT NULL DEFAULT '';

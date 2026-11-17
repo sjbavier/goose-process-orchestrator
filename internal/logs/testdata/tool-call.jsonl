@@ -1,0 +1,4 @@
+{"type":"toolRequest","id":"call_1","name":"shell","arguments":{"command":"ls"}}
+{"type":"message","message":{"id":"resp_1","role":"user","created":1,"content":[{"type":"text","text":"ignored user text"}]}}
+{"type":"message","message":{"id":"resp_2","role":"assistant","created":2,"content":[{"type":"toolUse","id":"call_1","name":"shell"},{"type":"text","text":"Running command"}],"metadata":{"inference":{"provider":"anthropic","requestedModel":"claude-test-1"}}}}
+{"type":"complete","total_tokens":200,"input_tokens":150,"output_tokens":50,"cache_read_input_tokens":10,"cache_write_input_tokens":5,"cost_usd":0.0009}

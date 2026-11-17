@@ -1,0 +1,115 @@
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/local/goose-process-orchestrator/internal/tasks"
+)
+
+// recordingValidator stands in for the launcher's Config. It records what it
+// was asked to validate so a test can prove admission consulted it with the
+// request's own recipe, and it can be told to reject.
+type recordingValidator struct {
+	calls  int
+	recipe string
+	params map[string]string
+	err    error
+}
+
+func (v *recordingValidator) ValidateRequest(recipe string, params map[string]string) error {
+	v.calls++
+	v.recipe, v.params = recipe, params
+	return v.err
+}
+
+func TestSpawnValidatesParametersBeforeReservingCapacity(t *testing.T) {
+	store := testStore(t)
+	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
+	defer close(runner.release)
+	sched, err := New(store, runner, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := &recordingValidator{err: errors.New("declaration rejected")}
+	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(validator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k1", Parameters: map[string]string{"k": "v"}})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Spawn = %v, want ErrInvalidRequest", err)
+	}
+	if !errorsContains(err, "declaration rejected") {
+		t.Fatalf("Spawn error %v should surface the validator's reason", err)
+	}
+	if validator.calls != 1 || validator.recipe != "allowed.yaml" {
+		t.Fatalf("validator was consulted %d times with recipe %q", validator.calls, validator.recipe)
+	}
+	// No capacity was consumed and no task row exists: the single-slot
+	// scheduler must still admit a subsequent valid request.
+	if listed, err := service.List(ctx, "", 100); err != nil || len(listed) != 0 {
+		t.Fatalf("rejected request left %d task rows (err %v)", len(listed), err)
+	}
+	validator.err = nil
+	if _, err := service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k2", Parameters: map[string]string{"k": "v"}}); err != nil {
+		t.Fatalf("a valid request after a rejection = %v; capacity was leaked", err)
+	}
+}
+
+func TestSpawnPersistsValidatedParameters(t *testing.T) {
+	store := testStore(t)
+	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
+	defer close(runner.release)
+	sched, err := New(store, runner, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(&recordingValidator{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]string{"feature_slug": "x", "mode": "local"}
+	task, err := service.Spawn(context.Background(), SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k1", Parameters: params})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	stored, err := service.Status(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(stored.Parameters) != 2 || stored.Parameters["feature_slug"] != "x" {
+		t.Fatalf("persisted parameters = %v", stored.Parameters)
+	}
+}
+
+// TestSpawnWithoutAValidatorFailsClosed proves a service that was never given a
+// validator refuses parameters instead of admitting unvalidated input.
+func TestSpawnWithoutAValidatorFailsClosed(t *testing.T) {
+	store := testStore(t)
+	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
+	defer close(runner.release)
+	sched, err := New(store, runner, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k1", Parameters: map[string]string{"k": "v"}}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Spawn with no validator = %v, want ErrInvalidRequest", err)
+	}
+	// A parameterless request on the same service is unaffected.
+	if _, err := service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k2"}); err != nil {
+		t.Fatalf("parameterless Spawn = %v, want success", err)
+	}
+}
+
+func errorsContains(err error, substring string) bool {
+	return err != nil && strings.Contains(err.Error(), substring)
+}

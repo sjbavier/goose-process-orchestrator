@@ -1,0 +1,8 @@
+not json at all
+{"no_type_field": true}
+{"type": 42}
+
+{"type":"message","message":"this should be an object not a string"}
+{"type":"message","message":{"id":"resp_1","role":"assistant","created":1,"content":[{"type":"text","text":"ok"}]}}
+{"type":"complete","total_tokens":"not-a-number"}
+{"type":"complete","total_tokens":7,"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":0,"cache_write_input_tokens":0,"cost_usd":0.001}
