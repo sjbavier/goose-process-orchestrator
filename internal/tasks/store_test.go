@@ -400,3 +400,24 @@ func TestStoreNormalizesAndRoundTripsInboxPolicy(t *testing.T) {
 		t.Fatalf("Create with changed InboxPolicy = %v, want ErrIdempotencyConflict", err)
 	}
 }
+
+// TestNewStoreClockAdvances guards against the clock being a method value
+// (time.Now().UTC), which evaluates time.Now() once and then returns that same
+// instant forever, freezing every stored timestamp at process start.
+func TestNewStoreClockAdvances(t *testing.T) {
+	_, store := openSQLiteStore(t)
+	ctx := context.Background()
+
+	first, _, err := store.Create(ctx, Task{ID: "clock-1", Recipe: "allowed.yaml", IdempotencyKey: "clock-1"})
+	if err != nil {
+		t.Fatalf("Create(clock-1): %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	second, _, err := store.Create(ctx, Task{ID: "clock-2", Recipe: "allowed.yaml", IdempotencyKey: "clock-2"})
+	if err != nil {
+		t.Fatalf("Create(clock-2): %v", err)
+	}
+	if !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("CreatedAt did not advance: first=%s second=%s", first.CreatedAt, second.CreatedAt)
+	}
+}

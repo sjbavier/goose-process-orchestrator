@@ -20,7 +20,9 @@ type Store struct {
 	now func() time.Time
 }
 
-func NewStore(db *sql.DB) *Store { return &Store{db: db, now: time.Now().UTC} }
+func NewStore(db *sql.DB) *Store {
+	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}
+}
 
 type createResult struct {
 	task     Task
