@@ -256,7 +256,7 @@ func progressOutput(p scheduler.ProgressResult) ProgressOutput {
 		BytesDropped:      p.BytesDropped,
 	}
 	if !p.LastEventAt.IsZero() {
-		out.LastEventAt = p.LastEventAt.Format(time.RFC3339)
+		out.LastEventAt = p.LastEventAt.UTC().Format(time.RFC3339)
 	}
 	return out
 }

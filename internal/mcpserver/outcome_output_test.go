@@ -100,3 +100,18 @@ func TestProgressOutputIncludesNewFieldsAndOmitsWhenAbsent(t *testing.T) {
 		t.Fatalf("progressOutput(empty) = %+v, want all zero/empty", empty)
 	}
 }
+
+// TestProgressOutputLastEventAtRendersUTC covers CR-018: a LastEventAt
+// carrying a non-UTC Location still renders with a trailing Z, not a
+// numeric offset.
+func TestProgressOutputLastEventAtRendersUTC(t *testing.T) {
+	local := time.FixedZone("UTC-5", -5*60*60)
+	lastEvent := time.Date(2026, 11, 19, 19, 0, 0, 0, local)
+	out := progressOutput(scheduler.ProgressResult{LastEventAt: lastEvent})
+	if want := lastEvent.UTC().Format(time.RFC3339); out.LastEventAt != want {
+		t.Fatalf("LastEventAt = %q, want %q", out.LastEventAt, want)
+	}
+	if out.LastEventAt == "" || out.LastEventAt[len(out.LastEventAt)-1] != 'Z' {
+		t.Fatalf("LastEventAt = %q, want trailing Z", out.LastEventAt)
+	}
+}

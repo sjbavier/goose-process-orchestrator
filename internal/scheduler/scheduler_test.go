@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
-	_ "modernc.org/sqlite"
 )
 
 type blockingRunner struct {
@@ -29,7 +27,7 @@ func (r *blockingRunner) Run(ctx context.Context, task tasks.Task) {
 
 func testStore(t *testing.T) *tasks.Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "tasks.db"))
+	db, err := tasks.OpenDB(filepath.Join(t.TempDir(), "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

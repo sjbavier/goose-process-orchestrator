@@ -28,15 +28,25 @@ or database paths.
 
 ## 2. Build and install atomically
 
-Build all three binaries from a temporary detached worktree at `HEAD`, with outputs in a separate temporary directory:
+Before building, confirm the toolchain that will actually resolve: run
+`go version` and `uname -m`, and compare the reported Go version against
+`go.mod`'s `go 1.27` and the reported arch against the build target. A
+non-interactive shell (such as the one Goose uses) can resolve a different,
+older `go` than an interactive shell does — if the version or arch doesn't
+match, stop and report every `go` on `PATH` (`which -a go`) rather than
+letting the build attempt a toolchain download.
+
+Build all three binaries from a temporary detached worktree at `HEAD`, with outputs in a separate temporary directory. Run with `GOTOOLCHAIN=local` so a wrong resolved toolchain fails fast instead of attempting a network download:
 
 ```sh
 git worktree add --detach "$src_tmp" HEAD
 ( cd "$src_tmp" &&
-  go build -o "$bin_tmp/goose-orchestrator" ./cmd/orchestrator &&
-  go build -o "$bin_tmp/goose-mcp-shim" ./cmd/mcp-shim &&
-  go build -o "$bin_tmp/goose-mailbox-extension" ./cmd/mailbox-extension )
+  GOTOOLCHAIN=local go build -o "$bin_tmp/goose-orchestrator" ./cmd/orchestrator &&
+  GOTOOLCHAIN=local go build -o "$bin_tmp/goose-mcp-shim" ./cmd/mcp-shim &&
+  GOTOOLCHAIN=local go build -o "$bin_tmp/goose-mailbox-extension" ./cmd/mailbox-extension )
 ```
+
+On macOS, also set `TMPDIR=/tmp` for `go test` until CR-019 lands.
 
 The detached worktree keeps build identity clean even if this instruction file
 is being revised in the primary checkout. Remove it with `git worktree remove`

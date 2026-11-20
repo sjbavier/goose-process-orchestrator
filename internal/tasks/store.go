@@ -14,6 +14,16 @@ import (
 var ErrNotFound = errors.New("task not found")
 var ErrIdempotencyConflict = errors.New("idempotency key belongs to a different request")
 
+// OpenDB opens the sqlite file at path with the one DSN every caller
+// (production and tests) must share: _busy_timeout so a concurrent writer
+// (e.g. the scheduler's worker claiming a task) and a concurrent reader
+// (e.g. a status poll) wait out a brief lock instead of surfacing
+// SQLITE_BUSY immediately. It does not migrate or wrap the result in a
+// Store; callers still do that themselves.
+func OpenDB(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path+"?_busy_timeout=5000")
+}
+
 // Store persists task state through a caller-supplied SQL driver. Opening a
 // SQLite driver is deliberately outside C02's dependency-edit boundary.
 type Store struct {
