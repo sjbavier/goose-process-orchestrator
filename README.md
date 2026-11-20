@@ -135,9 +135,21 @@ declared string parameters. Each entry becomes one `--params key=value` pair in
 the child process's argument array, sorted by key, so a value containing `=`,
 spaces, or quotes is passed through byte for byte and is never shell-joined.
 
-> **Never pass a secret as a parameter value.** Values are persisted in the
-> local task database as part of that task's audit record and are visible in
-> the run artifacts under `--runs-dir`. There is no redaction.
+For larger or multi-line text, `spawn` also accepts `file_parameters: {key:
+content}`. Each key satisfies the same declared `input_type: string` contract,
+but GPO stores its exact UTF-8 content, creates a private
+`<run-dir>/inputs/<key>` file (directory mode 0700, file mode 0600), and passes
+only that file's absolute path as the ordinary `--params key=path` value. Raw
+content never enters the child argv or any MCP response. A recipe reads the
+path using its normal file tools.
+
+> **Never pass a secret in either parameter form.** Scalar values and file
+> contents are persisted unencrypted in the local task database as durable
+> audit data; file contents are additionally materialized under `--runs-dir`
+> and may be sent to Goose/model/provider when the recipe reads them. There is
+> no secret detection, encryption, or redaction. Runs retention removes a
+> terminal run directory as a unit, including `inputs/`, but does not erase
+> the task row or its SQLite audit content.
 
 Parameters are validated before the server reserves capacity or creates a task
 row, so an invalid request starts no process and leaves nothing behind:

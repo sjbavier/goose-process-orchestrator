@@ -88,7 +88,10 @@ func LoadDeclarations(recipePath string) ([]Declaration, error) {
 // entry point: callers use it to reject a request before reserving scheduler
 // capacity or creating a task, and it starts no process.
 func (c Config) ValidateRequest(recipe string, params map[string]string) error {
-	if err := ValidateParameterShape(params); err != nil {
+	return c.ValidateRequestWithFiles(recipe, params, nil)
+}
+func (c Config) ValidateRequestWithFiles(recipe string, params, files map[string]string) error {
+	if err := ValidateRequestParameterShape(params, files); err != nil {
 		return err
 	}
 	resolved, err := approvedFile(c.RecipeRoot, recipe)
@@ -99,7 +102,7 @@ func (c Config) ValidateRequest(recipe string, params map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return validateAgainstDeclarations(declarations, params)
+	return validateAgainstDeclarations(declarations, params, files)
 }
 
 // loadRunnableRecipe verifies the recipe can run through Goose's headless
@@ -138,7 +141,7 @@ func validateDeclaredParameters(recipePath string, params map[string]string) err
 	if err != nil {
 		return err
 	}
-	return validateAgainstDeclarations(declarations, params)
+	return validateAgainstDeclarations(declarations, params, nil)
 }
 
 // ValidateParameters enforces the whole parameter contract for one request: the
@@ -153,16 +156,23 @@ func ValidateParameters(recipePath string, params map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return validateAgainstDeclarations(declarations, params)
+	return validateAgainstDeclarations(declarations, params, nil)
 }
 
-func validateAgainstDeclarations(declarations []Declaration, params map[string]string) error {
+func validateAgainstDeclarations(declarations []Declaration, params, files map[string]string) error {
 	declared := make(map[string]Declaration, len(declarations))
 	for _, declaration := range declarations {
 		declared[declaration.Key] = declaration
 	}
+	all := make(map[string]string, len(params)+len(files))
+	for key, value := range params {
+		all[key] = value
+	}
+	for key, value := range files {
+		all[key] = value
+	}
 	// Sorted iteration keeps the reported first offender independent of map order.
-	for _, key := range sortedKeys(params) {
+	for _, key := range sortedKeys(all) {
 		declaration, ok := declared[key]
 		if !ok {
 			return fmt.Errorf("%w: key %q is not declared by this recipe (declared: %s)", ErrInvalidParameters, key, declaredKeyList(declarations))
@@ -175,7 +185,10 @@ func validateAgainstDeclarations(declarations []Declaration, params map[string]s
 		if declaration.Requirement != requirementRequired {
 			continue
 		}
-		if _, ok := params[declaration.Key]; !ok {
+		if _, scalar := params[declaration.Key]; !scalar {
+			if _, file := files[declaration.Key]; file {
+				continue
+			}
 			return fmt.Errorf("%w: required key %q was not supplied", ErrInvalidParameters, declaration.Key)
 		}
 	}

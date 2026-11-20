@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -175,6 +176,67 @@ func TestSpawnIdempotencyCoversParameters(t *testing.T) {
 	out, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "spawn", Arguments: conflicting})
 	if err == nil && !out.IsError {
 		t.Fatalf("replaying one key with different parameters was accepted: %s", renderContent(out))
+	}
+}
+
+func TestSpawnFileParametersPersistConflictAndNeverEcho(t *testing.T) {
+	server, store, recipeRoot := newParameterServer(t)
+	session := connect(t, server)
+	recipe := filepath.Join(recipeRoot, "declared.yaml")
+	const content = "UNIQUE-UPLOADED-CONTENT\nline two"
+	args := map[string]any{"recipe": recipe, "idempotency_key": "file-key", "file_parameters": map[string]any{"feature_slug": content}}
+	out, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "spawn", Arguments: args})
+	if err != nil || out.IsError {
+		t.Fatalf("spawn file parameters = %v, %s", err, renderContent(out))
+	}
+	rows, err := store.List(context.Background(), tasks.ListFilter{Limit: 10})
+	if err != nil || len(rows) != 1 || rows[0].FileParameters["feature_slug"] != content {
+		t.Fatalf("persisted rows = %#v, %v", rows, err)
+	}
+	id := rows[0].ID
+	for _, call := range []struct {
+		name string
+		args map[string]any
+	}{{"spawn", args}, {"status", map[string]any{"id": id}}, {"result", map[string]any{"id": id}}, {"list", map[string]any{}}} {
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: call.name, Arguments: call.args})
+		if err != nil {
+			t.Fatalf("%s: %v", call.name, err)
+		}
+		rendered := renderContent(result)
+		if strings.Contains(rendered, "UNIQUE-UPLOADED-CONTENT") || strings.Contains(rendered, "file_parameters") {
+			t.Fatalf("%s echoed file input: %s", call.name, rendered)
+		}
+	}
+	conflict := map[string]any{"recipe": recipe, "idempotency_key": "file-key", "file_parameters": map[string]any{"feature_slug": "changed"}}
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "spawn", Arguments: conflict})
+	if err == nil && !result.IsError {
+		t.Fatalf("changed content silently reused task: %s", renderContent(result))
+	}
+}
+
+func TestSpawnRejectsInvalidFileParametersWithoutCreatingATask(t *testing.T) {
+	server, store, recipeRoot := newParameterServer(t)
+	session := connect(t, server)
+	recipe := filepath.Join(recipeRoot, "declared.yaml")
+	cases := []map[string]any{
+		{"parameters": map[string]any{"feature_slug": "x"}, "file_parameters": map[string]any{"feature_slug": "collision"}},
+		{"file_parameters": map[string]any{"../bad": "x", "feature_slug": "ok"}},
+		{"file_parameters": map[string]any{"feature_slug": strings.Repeat("x", goose.MaxFileParameterValueBytes+1)}},
+		{"file_parameters": map[string]any{"mode": "missing required"}},
+	}
+	for i, fields := range cases {
+		args := map[string]any{"recipe": recipe, "idempotency_key": fmt.Sprintf("bad-file-%d", i)}
+		for k, v := range fields {
+			args[k] = v
+		}
+		out, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "spawn", Arguments: args})
+		if err == nil && !out.IsError {
+			t.Fatalf("case %d accepted: %s", i, renderContent(out))
+		}
+	}
+	rows, err := store.List(context.Background(), tasks.ListFilter{Limit: 10})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("invalid requests left rows = %#v, %v", rows, err)
 	}
 }
 

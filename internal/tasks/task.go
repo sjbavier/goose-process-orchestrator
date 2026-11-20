@@ -45,6 +45,10 @@ type Task struct {
 	// it must never carry secrets. A nil or empty map means "no parameters"
 	// and is equivalent to a task created before parameters existed.
 	Parameters map[string]string
+	// FileParameters holds uploaded UTF-8 contents until launch materializes
+	// them as private files. Contents are durable unencrypted local audit data,
+	// participate in idempotency, and must never contain secrets.
+	FileParameters map[string]string
 	// InboxPolicy controls which senders this task's mailbox accepts. An
 	// empty value means "use the default" and is normalized to
 	// ControllerOnly before any row is written; it is never persisted as
@@ -125,6 +129,33 @@ func CanonicalParameters(params map[string]string) (string, error) {
 		return "", fmt.Errorf("encode task parameters: %w", err)
 	}
 	return string(encoded), nil
+}
+
+// CanonicalFileParameters returns the deterministic durable encoding used for
+// uploaded file contents. Exact bytes participate in idempotency; map insertion
+// order does not. Empty and nil maps preserve legacy-row equivalence.
+func CanonicalFileParameters(params map[string]string) (string, error) {
+	if len(params) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return "", fmt.Errorf("encode task file parameters: %w", err)
+	}
+	return string(encoded), nil
+}
+func decodeFileParameters(stored string) (map[string]string, error) {
+	if stored == "" {
+		return nil, nil
+	}
+	var params map[string]string
+	if err := json.Unmarshal([]byte(stored), &params); err != nil {
+		return nil, fmt.Errorf("decode persisted task file parameters: %w", err)
+	}
+	if params == nil {
+		return nil, fmt.Errorf("decode persisted task file parameters: stored value is not a file-parameter map")
+	}
+	return params, nil
 }
 
 // decodeParameters reverses CanonicalParameters. It fails closed: a stored

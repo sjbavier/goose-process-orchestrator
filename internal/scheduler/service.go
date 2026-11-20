@@ -54,7 +54,7 @@ type Service struct {
 // before any capacity reservation or task row exists. The launcher implements
 // it, so the same contract governs admission and the eventual argv.
 type ParameterValidator interface {
-	ValidateRequest(recipe string, params map[string]string) error
+	ValidateRequestWithFiles(recipe string, params, fileParams map[string]string) error
 }
 
 // Option configures a Service at construction.
@@ -105,6 +105,9 @@ type SpawnRequest struct {
 	// validated against the recipe's own declarations before admission, is
 	// part of the task's durable identity, and must never carry secrets.
 	Parameters map[string]string
+	// FileParameters holds bounded UTF-8 content for declared string parameters.
+	// It is durable unencrypted audit data and must never carry secrets.
+	FileParameters map[string]string
 	// InboxPolicy selects the spawned task's mailbox policy. Empty means
 	// unchanged (the store's own ControllerOnly default); a non-empty value
 	// must be one of tasks.KnownInboxPolicy's recognized strings, checked
@@ -125,10 +128,10 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	// starts no process. A service without a validator preserves parameterless
 	// library/test use, but still fails closed for supplied parameters.
 	if s.validator == nil {
-		if len(request.Parameters) > 0 {
+		if len(request.Parameters) > 0 || len(request.FileParameters) > 0 {
 			return tasks.Task{}, fmt.Errorf("%w: recipe parameters are not enabled on this server", ErrInvalidRequest)
 		}
-	} else if err := s.validator.ValidateRequest(request.Recipe, request.Parameters); err != nil {
+	} else if err := s.validator.ValidateRequestWithFiles(request.Recipe, request.Parameters, request.FileParameters); err != nil {
 		return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	inboxPolicy := tasks.InboxPolicy(request.InboxPolicy)
@@ -138,7 +141,7 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	if err := s.scheduler.Reserve(); err != nil {
 		return tasks.Task{}, err
 	}
-	task, inserted, err := s.store.Create(ctx, tasks.Task{ID: s.newID(), Recipe: request.Recipe, IdempotencyKey: request.IdempotencyKey, MaxTurns: request.MaxTurns, Parameters: request.Parameters, InboxPolicy: inboxPolicy})
+	task, inserted, err := s.store.Create(ctx, tasks.Task{ID: s.newID(), Recipe: request.Recipe, IdempotencyKey: request.IdempotencyKey, MaxTurns: request.MaxTurns, Parameters: request.Parameters, FileParameters: request.FileParameters, InboxPolicy: inboxPolicy})
 	if err != nil || !inserted {
 		s.scheduler.Release()
 		return task, err

@@ -28,11 +28,22 @@ type RunResult struct {
 }
 
 func (r Runner) Start(request Request, taskID string) (*supervisor.Process, artifacts.Run, *Live, error) {
+	// Validate uploaded contents and declarations before creating any run artifact.
+	if len(request.FileParameters) > 0 {
+		if err := r.Config.ValidateRequestWithFiles(request.Recipe, request.Parameters, request.FileParameters); err != nil {
+			return nil, artifacts.Run{}, nil, err
+		}
+	}
 	run, err := r.Artifacts.Create(taskID)
 	if err != nil {
 		return nil, artifacts.Run{}, nil, err
 	}
 	request.RunDir = run.Dir
+	request.Parameters, err = materializeFileParameters(run.Dir, request.Parameters, request.FileParameters)
+	if err != nil {
+		return nil, run, nil, err
+	}
+	request.FileParameters = nil
 	launch, err := r.Config.Build(request)
 	if err != nil {
 		return nil, run, nil, err

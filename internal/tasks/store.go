@@ -49,12 +49,16 @@ func (s *Store) createOnce(ctx context.Context, task Task) (createResult, error)
 	if err != nil {
 		return createResult{}, err
 	}
+	fileParameters, err := CanonicalFileParameters(task.FileParameters)
+	if err != nil {
+		return createResult{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return createResult{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (id, recipe, idempotency_key, status, created_at, updated_at, max_turns, parameters, inbox_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, task.Recipe, task.IdempotencyKey, task.Status, task.CreatedAt, task.UpdatedAt, task.MaxTurns, parameters, task.InboxPolicy)
+	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (id, recipe, idempotency_key, status, created_at, updated_at, max_turns, parameters, file_parameters, inbox_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, task.Recipe, task.IdempotencyKey, task.Status, task.CreatedAt, task.UpdatedAt, task.MaxTurns, parameters, fileParameters, task.InboxPolicy)
 	if err == nil {
 		return createResult{task, true}, tx.Commit()
 	}
@@ -70,7 +74,11 @@ func (s *Store) createOnce(ctx context.Context, task Task) (createResult, error)
 	if err != nil {
 		return createResult{}, err
 	}
-	if existing.Recipe != task.Recipe || existingParameters != parameters || existing.InboxPolicy != task.InboxPolicy {
+	existingFileParameters, err := CanonicalFileParameters(existing.FileParameters)
+	if err != nil {
+		return createResult{}, err
+	}
+	if existing.Recipe != task.Recipe || existingParameters != parameters || existingFileParameters != fileParameters || existing.InboxPolicy != task.InboxPolicy {
 		return createResult{}, ErrIdempotencyConflict
 	}
 	return createResult{existing, false}, tx.Commit()
@@ -389,7 +397,7 @@ func (s *Store) recordFailureOnce(ctx context.Context, id, failure string) (Task
 	return task, tx.Commit()
 }
 
-const taskColumnsSQL = `SELECT id, recipe, idempotency_key, status, created_at, updated_at, started_at, ended_at, cancel_requested_at, exit_code, result, failure, max_turns, parameters, pid, pgid, process_start_ticks, inbox_policy,
+const taskColumnsSQL = `SELECT id, recipe, idempotency_key, status, created_at, updated_at, started_at, ended_at, cancel_requested_at, exit_code, result, failure, max_turns, parameters, file_parameters, pid, pgid, process_start_ticks, inbox_policy,
 	final_text, final_text_truncated, outcome, complete_seen, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
 	tool_call_count, last_event_at, stalled_max_turns, stdout_truncated, bytes_dropped`
 const taskByIDSQL = taskColumnsSQL + ` FROM tasks WHERE id = ?`
@@ -412,12 +420,12 @@ func scanTaskRow(row rowScanner) (Task, error) {
 	var t Task
 	var started, ended, cancelled, lastEventAt sql.NullTime
 	var exit sql.NullInt64
-	var result, failure, parameters, finalText, outcome sql.NullString
+	var result, failure, parameters, fileParameters, finalText, outcome sql.NullString
 	var pid, pgid, startTicks sql.NullInt64
 	var finalTextTruncated, completeSeen, stalledMaxTurns, stdoutTruncated sql.NullBool
 	var totalTokens, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, toolCallCount, bytesDropped sql.NullInt64
 	var costUSD sql.NullFloat64
-	err := row.Scan(&t.ID, &t.Recipe, &t.IdempotencyKey, &t.Status, &t.CreatedAt, &t.UpdatedAt, &started, &ended, &cancelled, &exit, &result, &failure, &t.MaxTurns, &parameters, &pid, &pgid, &startTicks, &t.InboxPolicy,
+	err := row.Scan(&t.ID, &t.Recipe, &t.IdempotencyKey, &t.Status, &t.CreatedAt, &t.UpdatedAt, &started, &ended, &cancelled, &exit, &result, &failure, &t.MaxTurns, &parameters, &fileParameters, &pid, &pgid, &startTicks, &t.InboxPolicy,
 		&finalText, &finalTextTruncated, &outcome, &completeSeen, &totalTokens, &inputTokens, &outputTokens, &cacheReadTokens, &cacheWriteTokens, &costUSD,
 		&toolCallCount, &lastEventAt, &stalledMaxTurns, &stdoutTruncated, &bytesDropped)
 	if err != nil {
@@ -436,6 +444,9 @@ func scanTaskRow(row rowScanner) (Task, error) {
 		t.ProcessStartTicks = &v
 	}
 	if t.Parameters, err = decodeParameters(parameters.String); err != nil {
+		return Task{}, err
+	}
+	if t.FileParameters, err = decodeFileParameters(fileParameters.String); err != nil {
 		return Task{}, err
 	}
 	if started.Valid {

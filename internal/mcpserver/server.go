@@ -33,6 +33,9 @@ type SpawnInput struct {
 	// run artifacts, so they must never contain secrets. Parameters are
 	// deliberately absent from every response: see TaskOutput.
 	Parameters map[string]string `json:"parameters,omitempty"`
+	// FileParameters supplies bounded UTF-8 content for declared string parameters.
+	// Contents are persisted unencrypted and materialized under the task run directory; never pass secrets.
+	FileParameters map[string]string `json:"file_parameters,omitempty"`
 	// InboxPolicy selects the spawned task's mailbox policy. Omit it (or
 	// send "") for the default controller_only policy; "open" allows any
 	// sender to message this task's inbox.
@@ -257,10 +260,10 @@ func New(service Service) (*mcp.Server, error) {
 		}
 		return nil, ServerInfoOutput{RecipeRoot: info.RecipeRoot, Workdir: info.Workdir, RunsDir: info.RunsDir, GooseBinary: info.GooseBinary, GooseVersion: info.GooseVersion, MaxTurns: info.MaxTurns, MaxTurnsCeiling: info.MaxTurnsCeiling, MaxConcurrent: info.MaxConcurrent, Queued: info.Queued, Running: info.Running, MailboxEnabled: info.MailboxEnabled, OutputLimit: info.OutputLimit, RunsMaxAge: info.RunsMaxAge.String(), RunsMaxCount: info.RunsMaxCount, GPOVersion: info.GPOVersion, GPOCommit: info.GPOCommit, DaemonStartedAt: info.DaemonStartedAt.Format(time.RFC3339)}, nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "spawn", Description: "Queue an approved recipe. Optional max_turns overrides the server's default turn limit for this one task. Optional parameters supplies the recipe's declared string parameters; never pass secrets, because values are persisted locally and written to run artifacts. Optional inbox_policy selects the task's mailbox policy (\"controller_only\", the default, or \"open\")."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SpawnInput) (*mcp.CallToolResult, TaskOutput, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "spawn", Description: "Queue an approved recipe. Optional max_turns overrides the server's default turn limit. Optional parameters supplies declared strings. Optional file_parameters supplies bounded UTF-8 content that is persisted unencrypted and materialized as private run files; never pass secrets. Optional inbox_policy selects \"controller_only\" (default) or \"open\"."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SpawnInput) (*mcp.CallToolResult, TaskOutput, error) {
 		// A client transport/request lifecycle is not task ownership. Detach only
 		// cancellation so a stdio disconnect cannot cancel a successfully queued task.
-		t, e := service.Spawn(context.WithoutCancel(ctx), scheduler.SpawnRequest{Recipe: in.Recipe, IdempotencyKey: in.IdempotencyKey, MaxTurns: in.MaxTurns, Parameters: in.Parameters, InboxPolicy: in.InboxPolicy})
+		t, e := service.Spawn(context.WithoutCancel(ctx), scheduler.SpawnRequest{Recipe: in.Recipe, IdempotencyKey: in.IdempotencyKey, MaxTurns: in.MaxTurns, Parameters: in.Parameters, FileParameters: in.FileParameters, InboxPolicy: in.InboxPolicy})
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("spawn: %w", e)
 		}

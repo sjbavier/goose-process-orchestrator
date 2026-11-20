@@ -19,7 +19,9 @@ const (
 	// MaxParameterValueBytes caps a single value's UTF-8 length.
 	MaxParameterValueBytes = 4 << 10
 	// MaxParameterKeyBytes caps a key's length, matching parameterKeyPattern.
-	MaxParameterKeyBytes = 64
+	MaxParameterKeyBytes        = 64
+	MaxFileParameterValueBytes  = 256 << 10
+	MaxFileParametersTotalBytes = 1 << 20
 )
 
 // parameterKeyPattern is an ASCII identifier: a letter, then up to 63 letters,
@@ -97,4 +99,39 @@ func sortedKeys(params map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func ValidateRequestParameterShape(params, files map[string]string) error {
+	if len(params)+len(files) > MaxParameters {
+		return fmt.Errorf("%w: %d combined parameters exceeds the maximum of %d", ErrInvalidParameters, len(params)+len(files), MaxParameters)
+	}
+	if err := ValidateParameterShape(params); err != nil {
+		return err
+	}
+	total := 0
+	for _, key := range sortedKeys(files) {
+		if !parameterKeyPattern.MatchString(key) {
+			return fmt.Errorf("%w: file key %q must match %s", ErrInvalidParameters, key, parameterKeyPattern)
+		}
+		if _, exists := params[key]; exists {
+			return fmt.Errorf("%w: key %q appears in both parameters and file_parameters", ErrInvalidParameters, key)
+		}
+		value := files[key]
+		if len(value) > MaxFileParameterValueBytes {
+			return fmt.Errorf("%w: file value for key %q is %d bytes, exceeding the maximum of %d", ErrInvalidParameters, key, len(value), MaxFileParameterValueBytes)
+		}
+		if !utf8.ValidString(value) {
+			return fmt.Errorf("%w: file value for key %q is not valid UTF-8", ErrInvalidParameters, key)
+		}
+		for _, r := range value {
+			if r == 0 || (unicode.IsControl(r) && r != 9 && r != 10 && r != 13) {
+				return fmt.Errorf("%w: file value for key %q contains disallowed control character %U", ErrInvalidParameters, key, r)
+			}
+		}
+		total += len(value)
+	}
+	if total > MaxFileParametersTotalBytes {
+		return fmt.Errorf("%w: file parameter content totals %d bytes, exceeding the maximum of %d", ErrInvalidParameters, total, MaxFileParametersTotalBytes)
+	}
+	return nil
 }

@@ -16,12 +16,13 @@ type recordingValidator struct {
 	calls  int
 	recipe string
 	params map[string]string
+	files  map[string]string
 	err    error
 }
 
-func (v *recordingValidator) ValidateRequest(recipe string, params map[string]string) error {
+func (v *recordingValidator) ValidateRequestWithFiles(recipe string, params, files map[string]string) error {
 	v.calls++
-	v.recipe, v.params = recipe, params
+	v.recipe, v.params, v.files = recipe, params, files
 	return v.err
 }
 
@@ -39,15 +40,15 @@ func TestSpawnValidatesParametersBeforeReservingCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	_, err = service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k1", Parameters: map[string]string{"k": "v"}})
+	_, err = service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "k1", FileParameters: map[string]string{"k": "multi\nline"}})
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Spawn = %v, want ErrInvalidRequest", err)
 	}
 	if !errorsContains(err, "declaration rejected") {
 		t.Fatalf("Spawn error %v should surface the validator's reason", err)
 	}
-	if validator.calls != 1 || validator.recipe != "allowed.yaml" {
-		t.Fatalf("validator was consulted %d times with recipe %q", validator.calls, validator.recipe)
+	if validator.calls != 1 || validator.recipe != "allowed.yaml" || validator.files["k"] != "multi\nline" {
+		t.Fatalf("validator was consulted %d times with recipe %q and files %#v", validator.calls, validator.recipe, validator.files)
 	}
 	// No capacity was consumed and no task row exists: the single-slot
 	// scheduler must still admit a subsequent valid request.

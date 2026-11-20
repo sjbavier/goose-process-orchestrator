@@ -43,9 +43,10 @@ type Config struct {
 	Workdir string
 }
 type Request struct {
-	Recipe     string
-	Parameters map[string]string
-	RunDir     string
+	Recipe         string
+	Parameters     map[string]string
+	FileParameters map[string]string
+	RunDir         string
 	// MaxTurns overrides Config.MaxTurns for this one request when positive.
 	// Zero (the common case) means "use the server-wide default."
 	MaxTurns int
@@ -64,6 +65,12 @@ func (c Config) Build(r Request) (Launch, error) {
 	// request cannot even probe the filesystem.
 	if err := ValidateParameterShape(r.Parameters); err != nil {
 		return Launch{}, err
+	}
+	// Uploaded contents must be materialized by Runner.Start. Build accepts
+	// only ordinary scalar/path values so raw content can never be ignored or
+	// accidentally forwarded by a direct caller.
+	if len(r.FileParameters) > 0 {
+		return Launch{}, fmt.Errorf("%w: file parameters must be materialized before launch construction", ErrInvalidParameters)
 	}
 	if c.Binary == "" {
 		c.Binary = "goose"

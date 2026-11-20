@@ -24,6 +24,8 @@ exit 0
 
 // declaredRecipe declares the two parameters these tests supply.
 const declaredRecipe = `title: fixture
+prompt: |
+  Read the declared inputs.
 parameters:
   - key: feature_slug
     input_type: string

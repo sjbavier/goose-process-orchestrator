@@ -97,8 +97,8 @@ func TestMigrateUpgradesLegacyInlineDatabasePreservingRows(t *testing.T) {
 	if old.Recipe != "legacy.yaml" || old.Status != Succeeded || old.MaxTurns != 7 {
 		t.Fatalf("legacy row not preserved: %+v", old)
 	}
-	if old.Parameters != nil {
-		t.Fatalf("legacy row parameters = %v, want nil", old.Parameters)
+	if old.Parameters != nil || old.FileParameters != nil {
+		t.Fatalf("legacy row parameters = %v / file parameters = %v, want both nil", old.Parameters, old.FileParameters)
 	}
 	// An upgraded database must accept new parameterized writes and must treat
 	// the pre-existing row as equivalent to a no-parameter replay.

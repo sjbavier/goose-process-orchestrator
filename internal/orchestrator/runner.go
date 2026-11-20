@@ -82,7 +82,7 @@ func New(launcher Launcher, store Store) *Runner {
 // Run drives one claimed task to a terminal state. It is the scheduler.Runner
 // seam; the caller (scheduler.worker) does not inspect its return.
 func (r *Runner) Run(ctx context.Context, task tasks.Task) {
-	request := goose.Request{Recipe: task.Recipe, MaxTurns: task.MaxTurns, Parameters: task.Parameters}
+	request := goose.Request{Recipe: task.Recipe, MaxTurns: task.MaxTurns, Parameters: task.Parameters, FileParameters: task.FileParameters}
 	if r.Tokens != nil {
 		token, err := r.Tokens.Mint(task.ID)
 		if err != nil {
