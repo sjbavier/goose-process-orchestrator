@@ -57,6 +57,8 @@ type TaskOutput struct {
 	RunDir             string `json:"run_dir,omitempty"`
 	FinalText          string `json:"final_text,omitempty"`
 	FinalTextTruncated bool   `json:"final_text_truncated,omitempty"`
+	StdoutTruncated    bool   `json:"stdout_truncated,omitempty"`
+	BytesDropped       int64  `json:"bytes_dropped,omitempty"`
 	// Outcome is one of "completed", "stalled_max_turns",
 	// "no_complete_event", "process_failed", or absent for a non-terminal
 	// or cancelled task — see scheduler.OutcomeResult.
@@ -167,6 +169,7 @@ func outcomeOutput(r scheduler.OutcomeResult) TaskOutput {
 	t := r.Task
 	out := output(t)
 	out.RunDir, out.Outcome = r.RunDir, r.Outcome
+	out.StdoutTruncated, out.BytesDropped = r.StdoutTruncated, r.BytesDropped
 	out.FinalText, out.ExitCode, out.Failure = t.FinalText, t.ExitCode, t.Failure
 	if t.FinalTextTruncated != nil {
 		out.FinalTextTruncated = *t.FinalTextTruncated

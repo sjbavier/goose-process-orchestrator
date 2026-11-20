@@ -216,3 +216,42 @@ func TestProgressSourcesNewFieldsFromRowAndZeroWhenAbsent(t *testing.T) {
 		t.Fatalf("Progress(no summary) = %+v, want all zero/absent", absent)
 	}
 }
+
+// TestOutcomeSourcesCaptureStatsFromTaskRow covers status/result's row-backed
+// capture accounting, including the documented zero values for an older row
+// with no recorded live summary.
+func TestOutcomeSourcesCaptureStatsFromTaskRow(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	sched, err := New(store, nil, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, sched, func() string { return "unused" }, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTerminalTask(t, store, "t-outcome-stats", tasks.Succeeded)
+	if _, err := store.RecordOutcomeSummary(ctx, "t-outcome-stats", tasks.OutcomeSummary{
+		CompleteSeen: true, StdoutTruncated: true, BytesDropped: 4096,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set, err := service.Outcome(ctx, "t-outcome-stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.StdoutTruncated || set.BytesDropped != 4096 {
+		t.Fatalf("Outcome(with summary) capture stats = (%v, %d), want (true, 4096)", set.StdoutTruncated, set.BytesDropped)
+	}
+
+	newTerminalTask(t, store, "t-outcome-stats-absent", tasks.Succeeded)
+	absent, err := service.Outcome(ctx, "t-outcome-stats-absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absent.StdoutTruncated || absent.BytesDropped != 0 {
+		t.Fatalf("Outcome(no summary) capture stats = (%v, %d), want (false, 0)", absent.StdoutTruncated, absent.BytesDropped)
+	}
+}

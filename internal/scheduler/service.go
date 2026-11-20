@@ -296,6 +296,8 @@ type OutcomeResult struct {
 	// Cancelled task (cancellation already fully explains itself via
 	// status+cancel_requested).
 	Outcome             string
+	StdoutTruncated     bool
+	BytesDropped        int64
 	StderrTail          string
 	StderrTailTruncated bool
 }
@@ -332,6 +334,12 @@ func (s *Service) Outcome(ctx context.Context, id string) (OutcomeResult, error)
 		return OutcomeResult{}, err
 	}
 	result := OutcomeResult{Task: task, Outcome: outcomeFromTask(task)}
+	if task.StdoutTruncated != nil {
+		result.StdoutTruncated = *task.StdoutTruncated
+	}
+	if task.BytesDropped != nil {
+		result.BytesDropped = *task.BytesDropped
+	}
 	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
 	if err != nil {
 		return result, nil

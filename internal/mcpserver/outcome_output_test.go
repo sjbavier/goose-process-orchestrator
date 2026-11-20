@@ -23,7 +23,10 @@ func TestOutcomeOutputFullSummaryProducesExpectedFields(t *testing.T) {
 		CreatedAt: created, StartedAt: &started, EndedAt: &ended, ExitCode: &exit,
 		FinalText: "the answer", FinalTextTruncated: &truncated,
 	}
-	out := outcomeOutput(scheduler.OutcomeResult{Task: task, RunDir: "/runs/t1", Outcome: "completed"})
+	out := outcomeOutput(scheduler.OutcomeResult{
+		Task: task, RunDir: "/runs/t1", Outcome: "completed",
+		StdoutTruncated: true, BytesDropped: 2048,
+	})
 
 	if out.ID != "t1" || out.Status != "succeeded" || out.Result != "run-dir-path" {
 		t.Fatalf("base fields = %+v, want unchanged from output(t)", out)
@@ -33,6 +36,9 @@ func TestOutcomeOutputFullSummaryProducesExpectedFields(t *testing.T) {
 	}
 	if out.FinalText != "the answer" || !out.FinalTextTruncated {
 		t.Fatalf("FinalText/FinalTextTruncated = (%q, %v), want (the answer, true)", out.FinalText, out.FinalTextTruncated)
+	}
+	if !out.StdoutTruncated || out.BytesDropped != 2048 {
+		t.Fatalf("capture stats = (%v, %d), want (true, 2048)", out.StdoutTruncated, out.BytesDropped)
 	}
 	if out.ExitCode == nil || *out.ExitCode != 0 {
 		t.Fatalf("ExitCode = %v, want 0", out.ExitCode)
