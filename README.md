@@ -86,6 +86,8 @@ go run ./cmd/orchestrator --listen /path/to/orchestrator.sock \
 
 `--max-turns-ceiling` (default `200`) is a hard cap on any single `spawn`'s `max_turns` input, regardless of what a client requests.
 
+`--output-limit` (default `8388608`, 8 MiB) caps how many bytes of a spawned recipe's stdout are captured to its run directory's `stdout.raw`. Output past the cap is still read and counted but not stored, and `progress` reports `stdout_truncated`/`bytes_dropped` when that happened. The cap does **not** affect what a task reports: `final_text`, `outcome`, the token/cost totals, and `tool_call_count` are parsed from the full live stream as it arrives, so they stay correct for a run whose output far exceeds the cap. Must be positive — there is deliberately no "unlimited" setting, since an unbounded capture lets one runaway recipe fill the disk — and a non-positive value fails at startup before any task is accepted, the same way `--workdir` and `--mailbox-extension-binary` do.
+
 `--workdir` (default empty) overrides every spawned `goose run` child's working directory, which otherwise defaults to the task's own isolated run directory under `--runs-dir`. This matters for a recipe authored to assume a real project checkout as its cwd (relative paths like `./src/...` or `.config/...`); set `--workdir /path/to/that/checkout` so every spawn runs there instead. Only the child's cwd changes — `logs`/`progress`/retention still use the task's own run directory for captured `stdout`/`stderr`, since those paths are already absolute. Validated at startup (must be an accessible directory) the same way `--mailbox-extension-binary` is, so a bad path fails before any task is ever accepted. Leaving it empty keeps today's exact behavior.
 
 Use an absolute or otherwise operator-controlled `--db` path when the caller
@@ -349,7 +351,7 @@ go build -o orchestrator ./cmd/orchestrator
 
 `--max-concurrent`/`--max-turns`/`--runs-max-age`/`--runs-max-count`/`--runs-sweep-interval` here are only forwarded to the orchestrator the shim auto-starts; they have no effect when the shim just dials an already-running orchestrator (that orchestrator's own values, from whichever invocation actually started it, apply).
 
-The shim also forwards `--mailbox-extension-binary`, `--mailbox-socket`, `--max-turns-ceiling`, and `--workdir` to any orchestrator it auto-starts, unconditionally, with defaults (`""`, `"mailbox.sock"`, `200`, `""`) matching `cmd/orchestrator`'s own — so an orchestrator the shim auto-starts behaves the same as one started directly with no flags. Pass the shim its own `--mailbox-extension-binary`/`--mailbox-socket`/`--max-turns-ceiling`/`--workdir` flags to change what it forwards.
+The shim also forwards `--mailbox-extension-binary`, `--mailbox-socket`, `--max-turns-ceiling`, `--workdir`, and `--output-limit` to any orchestrator it auto-starts, unconditionally, with defaults (`""`, `"mailbox.sock"`, `200`, `""`, `8388608`) matching `cmd/orchestrator`'s own — so an orchestrator the shim auto-starts behaves the same as one started directly with no flags. Pass the shim its own `--mailbox-extension-binary`/`--mailbox-socket`/`--max-turns-ceiling`/`--workdir`/`--output-limit` flags to change what it forwards. The shim rejects a non-positive `--output-limit` itself rather than forwarding it, so the failure reads as the actual reason instead of a dial timeout against an orchestrator that exited immediately.
 
 The client's actual stdio child is `mcp-shim`, not `orchestrator`. The first
 client to connect through the shim causes an orchestrator to auto-start; every
@@ -395,7 +397,42 @@ Whichever transport mode is in use, call only the server's typed task tools:
    record the returned task ID.
 2. Use `status` and `result` later, including after reconnecting a client
    (in persistent mode, from a different connection entirely), with that task
-   ID.
+   ID. Both return `id`, `status`, `result`, and `cancel_requested`, plus —
+   for a task this server actually ran — `run_dir`, `final_text` (the last
+   assistant message, with `final_text_truncated` when it was bounded),
+   `outcome`, `exit_code`, `failure`, `created_at`/`started_at`/`ended_at`,
+   and, for a task whose process failed, a bounded `stderr_tail` (4 KiB,
+   with `stderr_tail_truncated`). `result` keeps its existing meaning — the
+   run-directory path, not the model's answer; read `final_text` for that.
+   `outcome` is the server's own classification of how a terminal task
+   ended:
+
+   | `outcome` | Meaning |
+   |---|---|
+   | `completed` | the stream's own `complete` event was seen — the only value that affirmatively confirms a finished run |
+   | `process_failed` | the process ran and exited non-zero; see `exit_code` and `stderr_tail` |
+   | `no_complete_event` | the task reached a terminal status but no `complete` event was ever observed, so success cannot be confirmed |
+   | `stalled_max_turns` | the run stopped by hitting its turn limit — **never returned by this build; see the limitation below** |
+   | absent | a non-terminal or cancelled task (cancellation is already fully explained by `status` + `cancel_requested`) |
+
+   A task that this server never saw run live — one re-adopted after an
+   orchestrator restart, or created before migration `005` — reports these
+   fields as absent and `outcome` as `no_complete_event`. That is deliberate:
+   the server reports `completed` only when it observed the evidence for it,
+   and never guesses it from a `succeeded` status alone.
+
+   **Limitation:** `stalled_max_turns` is not currently reachable. Detecting
+   a max-turns stall requires matching Goose's own stop message, and no
+   confirmed sample of that text has been captured, so the matcher ships
+   disabled rather than guessing at wording that might change between Goose
+   versions. A run that stalls on its turn limit and exits 0 is therefore
+   reported as `no_complete_event` — accurate, but less specific than it
+   could be. It is never reported as `completed`.
+
+   **Warning:** `final_text` and `stderr_tail` are unfiltered model/process
+   output, exactly like `logs` and `progress` — they can contain anything the
+   recipe or model wrote, including secrets if the recipe was authored
+   carelessly. Nothing here redacts them.
 3. Send `cancel` only when cancellation is intended. A disconnected client does
    not cancel a task.
 4. If a task ID was lost (chat compaction, a new session, a different
@@ -426,7 +463,13 @@ Whichever transport mode is in use, call only the server's typed task tools:
    same output: `message_event_count`, `last_assistant_text` (bounded),
    `provider`, `model`, and, once a `complete` event has been seen,
    `complete: true` plus `total_tokens`/`input_tokens`/`output_tokens`/
-   `cache_read_tokens`/`cache_write_tokens`/`cost_usd`. Unknown or malformed
+   `cache_read_tokens`/`cache_write_tokens`/`cost_usd`. It also reports
+   `tool_call_count` and `last_event_at` (when the task last produced a
+   stream event — useful for telling a slow task from a wedged one), and
+   `stdout_truncated`/`bytes_dropped` when the run's output exceeded
+   `--output-limit`. Those four come from what was parsed live as the task
+   ran, so they are absent for a task re-adopted after a restart or created
+   before migration `005`. Unknown or malformed
    lines in the underlying stream are skipped, never fatal. **Read
    `message_event_count` only as a rough activity signal, not a turn
    count** — a single logical reply can be streamed as several `message`

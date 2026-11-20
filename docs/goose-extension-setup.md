@@ -33,7 +33,7 @@ mkdir -p ~/.local/state/goose-orchestrator
 | `--socket` | `~/.local/state/goose-orchestrator/orchestrator.sock` | Parent directory must already exist. Local filesystem permissions only (mode 0600); never a network listener. |
 | `--db` | `~/.local/state/goose-orchestrator/orchestrator.db` | SQLite task records. An existing file from an earlier version is upgraded in place on startup: the orchestrator now applies forward-only numbered migrations and records each in a `schema_migrations` table, so you no longer need to delete the file or pick a fresh path when the schema gains a column. Your existing task history is preserved. |
 | `--recipe-root` | wherever your recipes live | Must already exist; every spawned recipe must resolve under it. |
-| `--runs-dir` | `~/.local/state/goose-orchestrator/runs` | Per-task stdout/stderr/evidence directories. |
+| `--runs-dir` | `~/.local/state/goose-orchestrator/runs` | Per-task stdout/stderr/evidence directories. Each task's captured stdout is capped at 8 MiB by default (`--output-limit`); nothing deletes a finished task's directory unless run-directory retention is turned on, so size this path for the total you intend to keep. |
 
 ## 3. Find your Goose config file
 
@@ -122,7 +122,7 @@ Ask Goose (or call the tools directly if you're scripting this) to:
 
 1. `spawn` a trivial, already-allowlisted recipe; note the returned task `id`.
 2. `status` with that `id` — confirm it's not an error and progresses toward a terminal state.
-3. `result` with that `id` once it finishes.
+3. `result` with that `id` once it finishes. Check `outcome` is `completed` and read the model's own answer from `final_text` — `result`'s `result` field is the run-directory path, not the answer. An `outcome` of `no_complete_event` on a task this orchestrator ran start to finish is worth investigating; see the `outcome` table in the root README.
 4. For persistent mode specifically: close the Goose window/session entirely, then start a brand new one and `status` the same `id` again — it should show the real state, not be lost. That's the capability this whole setup exists for.
 
 If step 4 doesn't work, confirm `cmd` really points at `goose-mcp-shim` and not `goose-orchestrator` — pointing a client directly at the orchestrator binary with `--mcp-stdio` instead would "work" for steps 1-3 but silently drop exactly the disconnect-survival property step 4 is checking.
