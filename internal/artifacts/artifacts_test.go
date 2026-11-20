@@ -122,6 +122,72 @@ func FuzzFindRunTaskID(f *testing.F) {
 	})
 }
 
+func TestCaptureStatsAcrossMultipleWrites(t *testing.T) {
+	m := Manager{Root: t.TempDir(), Limit: 5}
+	r, e := m.Create("task-stats")
+	if e != nil {
+		t.Fatal(e)
+	}
+	w, e := m.OpenCapture(r.StdoutPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, chunk := range []string{"ab", "cd", "ef", "gh"} {
+		if _, e := w.Write([]byte(chunk)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	w.Close()
+	written, dropped, truncated := w.Stats()
+	if written != 5 || dropped != 3 || !truncated {
+		t.Fatalf("Stats() = (%d, %d, %v), want (5, 3, true)", written, dropped, truncated)
+	}
+}
+
+func TestCaptureStatsExactlyAtLimitIsNotTruncated(t *testing.T) {
+	m := Manager{Root: t.TempDir(), Limit: 4}
+	r, e := m.Create("task-exact")
+	if e != nil {
+		t.Fatal(e)
+	}
+	w, e := m.OpenCapture(r.StdoutPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := w.Write([]byte("abcd")); e != nil {
+		t.Fatal(e)
+	}
+	w.Close()
+	written, dropped, truncated := w.Stats()
+	if written != 4 || dropped != 0 || truncated {
+		t.Fatalf("Stats() = (%d, %d, %v), want (4, 0, false)", written, dropped, truncated)
+	}
+}
+
+func TestDefaultOutputLimitAppliesToZeroValueManager(t *testing.T) {
+	if DefaultOutputLimit != 8*1024*1024 {
+		t.Fatalf("DefaultOutputLimit = %d, want 8 MiB", DefaultOutputLimit)
+	}
+	m := Manager{Root: t.TempDir()}
+	r, e := m.Create("task-default")
+	if e != nil {
+		t.Fatal(e)
+	}
+	w, e := m.OpenCapture(r.StdoutPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	payload := make([]byte, DefaultOutputLimit+1)
+	if _, e := w.Write(payload); e != nil {
+		t.Fatal(e)
+	}
+	w.Close()
+	written, dropped, truncated := w.Stats()
+	if written != DefaultOutputLimit || dropped != 1 || !truncated {
+		t.Fatalf("Stats() = (%d, %d, %v), want (%d, 1, true)", written, dropped, truncated, DefaultOutputLimit)
+	}
+}
+
 func TestFindRunDoesNotConfusePrefixedTaskIDs(t *testing.T) {
 	m := Manager{Root: t.TempDir()}
 	if _, e := m.Create("task-1"); e != nil {

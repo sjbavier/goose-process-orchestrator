@@ -8,9 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-const DefaultOutputLimit int64 = 256 * 1024
+const DefaultOutputLimit int64 = 8 * 1024 * 1024
 
 // ErrRunNotFound means no run directory matching a task ID exists below
 // Root, or more than one does (ambiguous — treated as not found rather
@@ -101,8 +102,11 @@ func validSegment(s string) error {
 }
 
 // OpenCapture returns a writer that always drains its input while retaining at
-// most Limit bytes. Call Close after the child has exited.
-func (m Manager) OpenCapture(path string) (io.WriteCloser, error) {
+// most Limit bytes. Call Close after the child has exited. The concrete
+// *Capture return type additionally exposes Stats; callers that only need
+// io.WriteCloser (Go's structural typing) are unaffected by this method's
+// presence.
+func (m Manager) OpenCapture(path string) (*Capture, error) {
 	if m.Limit <= 0 {
 		m.Limit = DefaultOutputLimit
 	}
@@ -110,16 +114,28 @@ func (m Manager) OpenCapture(path string) (io.WriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &capture{file: f, limit: m.Limit}, nil
+	return &Capture{file: f, limit: m.Limit}, nil
 }
 
-type capture struct {
-	file           *os.File
-	limit, written int64
+// Capture is the concrete writer OpenCapture returns: an io.WriteCloser that
+// retains at most limit bytes while still observing (and draining) every
+// byte written, so Stats reports the true written/dropped totals regardless
+// of the cap. It is mutex-guarded because a caller may poll Stats
+// concurrently with the child process's own stdout pump goroutine still
+// calling Write (exec.Cmd's non-*os.File Stdout is driven by an internal
+// goroutine owned by the Cmd, not by whatever goroutine called Start).
+type Capture struct {
+	file *os.File
+
+	mu                   sync.Mutex
+	limit, written, seen int64
 }
 
-func (c *capture) Write(p []byte) (int, error) {
+func (c *Capture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	original := len(p)
+	c.seen += int64(original)
 	if c.written < c.limit {
 		keep := int64(len(p))
 		if remain := c.limit - c.written; keep > remain {
@@ -138,7 +154,15 @@ func (c *capture) Write(p []byte) (int, error) {
 	}
 	return original, nil
 }
-func (c *capture) Close() error { return c.file.Close() }
+func (c *Capture) Close() error { return c.file.Close() }
+
+// Stats reports how many bytes were kept on disk, how many were seen but
+// dropped past the limit, and whether any drop occurred at all.
+func (c *Capture) Stats() (written, dropped int64, truncated bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.written, c.seen - c.written, c.seen > c.written
+}
 
 // Resolve confirms a requested evidence name remains a plain path beneath run.
 func (r Run) Resolve(name string) (string, error) {
