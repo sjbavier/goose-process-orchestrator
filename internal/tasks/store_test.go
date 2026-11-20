@@ -421,3 +421,100 @@ func TestNewStoreClockAdvances(t *testing.T) {
 		t.Fatalf("CreatedAt did not advance: first=%s second=%s", first.CreatedAt, second.CreatedAt)
 	}
 }
+
+// TestRecordOutcomeSummaryRoundTripsEveryFieldAndLeavesOtherColumnsUntouched
+// round-trips every new field including the zero/false/empty case, and
+// diffs a full row before/after on fields outside the new ones, per C3's
+// focused checks.
+func TestRecordOutcomeSummaryRoundTripsEveryFieldAndLeavesOtherColumnsUntouched(t *testing.T) {
+	_, store := openSQLiteStore(t)
+	ctx := context.Background()
+	created, _, err := store.Create(ctx, Task{ID: "task-1", Recipe: "allowed.yaml", IdempotencyKey: "key-1", MaxTurns: 7, Parameters: map[string]string{"a": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lastEvent := time.Date(2026, 11, 19, 18, 0, 0, 0, time.UTC)
+	summary := OutcomeSummary{
+		FinalText: "the assistant's last message", FinalTextTruncated: true,
+		Outcome: "stalled_max_turns", CompleteSeen: false,
+		TotalTokens: 123, InputTokens: 100, OutputTokens: 23, CacheReadTokens: 5, CacheWriteTokens: 6,
+		CostUSD: 0.042, ToolCallCount: 9, LastEventAt: lastEvent, StalledMaxTurns: true,
+		StdoutTruncated: true, BytesDropped: 4096,
+	}
+	updated, err := store.RecordOutcomeSummary(ctx, "task-1", summary)
+	if err != nil {
+		t.Fatalf("RecordOutcomeSummary: %v", err)
+	}
+	assertSummary := func(t *testing.T, got Task) {
+		t.Helper()
+		if got.FinalText != summary.FinalText || got.FinalTextTruncated == nil || *got.FinalTextTruncated != true {
+			t.Fatalf("FinalText/FinalTextTruncated = (%q, %v), want (%q, true)", got.FinalText, got.FinalTextTruncated, summary.FinalText)
+		}
+		if got.Outcome != summary.Outcome || got.CompleteSeen == nil || *got.CompleteSeen != false {
+			t.Fatalf("Outcome/CompleteSeen = (%q, %v), want (%q, false)", got.Outcome, got.CompleteSeen, summary.Outcome)
+		}
+		if got.TotalTokens == nil || *got.TotalTokens != 123 || got.InputTokens == nil || *got.InputTokens != 100 || got.OutputTokens == nil || *got.OutputTokens != 23 {
+			t.Fatalf("token fields = (%v, %v, %v), want (123, 100, 23)", got.TotalTokens, got.InputTokens, got.OutputTokens)
+		}
+		if got.CacheReadTokens == nil || *got.CacheReadTokens != 5 || got.CacheWriteTokens == nil || *got.CacheWriteTokens != 6 {
+			t.Fatalf("cache token fields = (%v, %v), want (5, 6)", got.CacheReadTokens, got.CacheWriteTokens)
+		}
+		if got.CostUSD == nil || *got.CostUSD != 0.042 {
+			t.Fatalf("CostUSD = %v, want 0.042", got.CostUSD)
+		}
+		if got.ToolCallCount == nil || *got.ToolCallCount != 9 {
+			t.Fatalf("ToolCallCount = %v, want 9", got.ToolCallCount)
+		}
+		if got.LastEventAt == nil || !got.LastEventAt.Equal(lastEvent) {
+			t.Fatalf("LastEventAt = %v, want %v", got.LastEventAt, lastEvent)
+		}
+		if got.StalledMaxTurns == nil || *got.StalledMaxTurns != true {
+			t.Fatalf("StalledMaxTurns = %v, want true", got.StalledMaxTurns)
+		}
+		if got.StdoutTruncated == nil || *got.StdoutTruncated != true {
+			t.Fatalf("StdoutTruncated = %v, want true", got.StdoutTruncated)
+		}
+		if got.BytesDropped == nil || *got.BytesDropped != 4096 {
+			t.Fatalf("BytesDropped = %v, want 4096", got.BytesDropped)
+		}
+	}
+	assertSummary(t, updated)
+	reGot, err := store.Get(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("Get after RecordOutcomeSummary: %v", err)
+	}
+	assertSummary(t, reGot)
+
+	// Every pre-existing column outside the new summary fields must be
+	// byte-identical to the row Create produced.
+	if reGot.ID != created.ID || reGot.Recipe != created.Recipe || reGot.IdempotencyKey != created.IdempotencyKey ||
+		reGot.Status != created.Status || !reGot.CreatedAt.Equal(created.CreatedAt) || reGot.MaxTurns != created.MaxTurns {
+		t.Fatalf("RecordOutcomeSummary altered an unrelated column: before=%+v after=%+v", created, reGot)
+	}
+	if len(reGot.Parameters) != 1 || reGot.Parameters["a"] != "1" {
+		t.Fatalf("RecordOutcomeSummary altered Parameters: %+v", reGot.Parameters)
+	}
+
+	// The zero/false/empty case: a second task that never had a summary
+	// recorded must decode every new field as nil/empty, never a zero-value
+	// false positive.
+	if _, _, err := store.Create(ctx, Task{ID: "task-2", Recipe: "allowed.yaml", IdempotencyKey: "key-2"}); err != nil {
+		t.Fatal(err)
+	}
+	untouched, err := store.Get(ctx, "task-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.FinalText != "" || untouched.FinalTextTruncated != nil || untouched.Outcome != "" || untouched.CompleteSeen != nil ||
+		untouched.TotalTokens != nil || untouched.InputTokens != nil || untouched.OutputTokens != nil ||
+		untouched.CacheReadTokens != nil || untouched.CacheWriteTokens != nil || untouched.CostUSD != nil ||
+		untouched.ToolCallCount != nil || untouched.LastEventAt != nil || untouched.StalledMaxTurns != nil ||
+		untouched.StdoutTruncated != nil || untouched.BytesDropped != nil {
+		t.Fatalf("task with no recorded summary has non-absent summary fields: %+v", untouched)
+	}
+
+	if _, err := store.RecordOutcomeSummary(ctx, "no-such-task", OutcomeSummary{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RecordOutcomeSummary(missing id) = %v, want ErrNotFound", err)
+	}
+}

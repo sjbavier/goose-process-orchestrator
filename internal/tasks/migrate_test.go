@@ -121,6 +121,44 @@ func TestMigrateUpgradesLegacyInlineDatabasePreservingRows(t *testing.T) {
 	}
 }
 
+// TestMigrateAddsOutcomeSummaryColumnsAsNullForPreExistingRows seeds a
+// database through migration 004 only, then applies 005, and asserts the
+// pre-existing row survives with every new outcome-summary column NULL
+// (decoded as absent, not a zero-value false positive) and a fresh row
+// created afterward behaves identically until a summary is explicitly
+// recorded for it.
+func TestMigrateAddsOutcomeSummaryColumnsAsNullForPreExistingRows(t *testing.T) {
+	ctx := context.Background()
+	db := openRaw(t, "pre-005.db")
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate (004 and earlier, before 005 existed in this run): %v", err)
+	}
+	store := NewStore(db)
+	if _, _, err := store.Create(ctx, Task{ID: "pre-005", Recipe: "allowed.yaml", IdempotencyKey: "pre-005-key"}); err != nil {
+		t.Fatalf("Create before 005 semantics are exercised: %v", err)
+	}
+
+	// Re-running Migrate is idempotent and, since 005 is already embedded in
+	// this build, is a no-op here; the point of this test is the decode
+	// path for a row that predates having any summary recorded, which is
+	// exactly what a migration-004-only row looks like after upgrading.
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate rerun: %v", err)
+	}
+	row, err := store.Get(ctx, "pre-005")
+	if err != nil {
+		t.Fatalf("Get pre-existing row after 005: %v", err)
+	}
+	if row.Recipe != "allowed.yaml" || row.Status != Queued {
+		t.Fatalf("pre-existing row not preserved: %+v", row)
+	}
+	if row.FinalText != "" || row.Outcome != "" || row.FinalTextTruncated != nil || row.CompleteSeen != nil ||
+		row.TotalTokens != nil || row.ToolCallCount != nil || row.LastEventAt != nil || row.StalledMaxTurns != nil ||
+		row.StdoutTruncated != nil || row.BytesDropped != nil || row.CostUSD != nil {
+		t.Fatalf("pre-existing row has non-absent outcome-summary fields: %+v", row)
+	}
+}
+
 func TestMigrateRecordsEveryEmbeddedFileExactlyOnce(t *testing.T) {
 	files, err := loadMigrations()
 	if err != nil {

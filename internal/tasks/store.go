@@ -293,7 +293,82 @@ func (s *Store) recordProcessIdentityOnce(ctx context.Context, id string, pid, p
 	return task, tx.Commit()
 }
 
-const taskColumnsSQL = `SELECT id, recipe, idempotency_key, status, created_at, updated_at, started_at, ended_at, cancel_requested_at, exit_code, result, failure, max_turns, parameters, pid, pgid, process_start_ticks, inbox_policy`
+// RecordOutcomeSummary persists the live-parsed/capture-accounted outcome
+// summary (migration 005) for one task, following the store's existing
+// withBusyRetry pattern like every other write here. It is independent of
+// where the data came from (a periodic flush or the final one) and may be
+// called any number of times for the same task; each call overwrites the
+// previous summary in full.
+func (s *Store) RecordOutcomeSummary(ctx context.Context, id string, summary OutcomeSummary) (Task, error) {
+	return withBusyRetry(ctx, func() (Task, error) { return s.recordOutcomeSummaryOnce(ctx, id, summary) })
+}
+func (s *Store) recordOutcomeSummaryOnce(ctx context.Context, id string, summary OutcomeSummary) (Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET
+		final_text=?, final_text_truncated=?, outcome=?, complete_seen=?,
+		total_tokens=?, input_tokens=?, output_tokens=?, cache_read_tokens=?, cache_write_tokens=?, cost_usd=?,
+		tool_call_count=?, last_event_at=?, stalled_max_turns=?, stdout_truncated=?, bytes_dropped=?
+		WHERE id=?`,
+		summary.FinalText, summary.FinalTextTruncated, summary.Outcome, summary.CompleteSeen,
+		summary.TotalTokens, summary.InputTokens, summary.OutputTokens, summary.CacheReadTokens, summary.CacheWriteTokens, summary.CostUSD,
+		summary.ToolCallCount, summary.LastEventAt, summary.StalledMaxTurns, summary.StdoutTruncated, summary.BytesDropped,
+		id)
+	if err != nil {
+		return Task{}, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return Task{}, err
+	}
+	if n != 1 {
+		return Task{}, ErrNotFound
+	}
+	task, err := scanTask(tx.QueryRowContext(ctx, taskByIDSQL, id))
+	if err != nil {
+		return Task{}, err
+	}
+	return task, tx.Commit()
+}
+
+// RecordFailure persists an orchestrator-level failure reason for a task
+// that never produced a real process exit code (e.g. Launcher.Start itself
+// erroring before any process existed), following the store's existing
+// withBusyRetry pattern. It touches only the failure column — never Result,
+// status, or any other field.
+func (s *Store) RecordFailure(ctx context.Context, id, failure string) (Task, error) {
+	return withBusyRetry(ctx, func() (Task, error) { return s.recordFailureOnce(ctx, id, failure) })
+}
+func (s *Store) recordFailureOnce(ctx context.Context, id, failure string) (Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET failure=? WHERE id=?`, failure, id)
+	if err != nil {
+		return Task{}, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return Task{}, err
+	}
+	if n != 1 {
+		return Task{}, ErrNotFound
+	}
+	task, err := scanTask(tx.QueryRowContext(ctx, taskByIDSQL, id))
+	if err != nil {
+		return Task{}, err
+	}
+	return task, tx.Commit()
+}
+
+const taskColumnsSQL = `SELECT id, recipe, idempotency_key, status, created_at, updated_at, started_at, ended_at, cancel_requested_at, exit_code, result, failure, max_turns, parameters, pid, pgid, process_start_ticks, inbox_policy,
+	final_text, final_text_truncated, outcome, complete_seen, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+	tool_call_count, last_event_at, stalled_max_turns, stdout_truncated, bytes_dropped`
 const taskByIDSQL = taskColumnsSQL + ` FROM tasks WHERE id = ?`
 const taskByKeySQL = taskColumnsSQL + ` FROM tasks WHERE idempotency_key = ?`
 
@@ -312,11 +387,16 @@ func scanTask(row *sql.Row) (Task, error) {
 
 func scanTaskRow(row rowScanner) (Task, error) {
 	var t Task
-	var started, ended, cancelled sql.NullTime
+	var started, ended, cancelled, lastEventAt sql.NullTime
 	var exit sql.NullInt64
-	var result, failure, parameters sql.NullString
+	var result, failure, parameters, finalText, outcome sql.NullString
 	var pid, pgid, startTicks sql.NullInt64
-	err := row.Scan(&t.ID, &t.Recipe, &t.IdempotencyKey, &t.Status, &t.CreatedAt, &t.UpdatedAt, &started, &ended, &cancelled, &exit, &result, &failure, &t.MaxTurns, &parameters, &pid, &pgid, &startTicks, &t.InboxPolicy)
+	var finalTextTruncated, completeSeen, stalledMaxTurns, stdoutTruncated sql.NullBool
+	var totalTokens, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, toolCallCount, bytesDropped sql.NullInt64
+	var costUSD sql.NullFloat64
+	err := row.Scan(&t.ID, &t.Recipe, &t.IdempotencyKey, &t.Status, &t.CreatedAt, &t.UpdatedAt, &started, &ended, &cancelled, &exit, &result, &failure, &t.MaxTurns, &parameters, &pid, &pgid, &startTicks, &t.InboxPolicy,
+		&finalText, &finalTextTruncated, &outcome, &completeSeen, &totalTokens, &inputTokens, &outputTokens, &cacheReadTokens, &cacheWriteTokens, &costUSD,
+		&toolCallCount, &lastEventAt, &stalledMaxTurns, &stdoutTruncated, &bytesDropped)
 	if err != nil {
 		return Task{}, err
 	}
@@ -349,10 +429,44 @@ func scanTaskRow(row rowScanner) (Task, error) {
 		t.ExitCode = &v
 	}
 	t.Result, t.Failure = result.String, failure.String
+	t.FinalText, t.Outcome = finalText.String, outcome.String
+	t.FinalTextTruncated = nullBoolPtr(finalTextTruncated)
+	t.CompleteSeen = nullBoolPtr(completeSeen)
+	t.StalledMaxTurns = nullBoolPtr(stalledMaxTurns)
+	t.StdoutTruncated = nullBoolPtr(stdoutTruncated)
+	t.TotalTokens = nullInt64Ptr(totalTokens)
+	t.InputTokens = nullInt64Ptr(inputTokens)
+	t.OutputTokens = nullInt64Ptr(outputTokens)
+	t.CacheReadTokens = nullInt64Ptr(cacheReadTokens)
+	t.CacheWriteTokens = nullInt64Ptr(cacheWriteTokens)
+	t.ToolCallCount = nullInt64Ptr(toolCallCount)
+	t.BytesDropped = nullInt64Ptr(bytesDropped)
+	if costUSD.Valid {
+		v := costUSD.Float64
+		t.CostUSD = &v
+	}
+	if lastEventAt.Valid {
+		t.LastEventAt = ptrTime(lastEventAt.Time)
+	}
 	if !knownStatus(t.Status) {
 		return Task{}, fmt.Errorf("unknown persisted task status %q", t.Status)
 	}
 	return t, nil
+}
+
+func nullBoolPtr(v sql.NullBool) *bool {
+	if !v.Valid {
+		return nil
+	}
+	b := v.Bool
+	return &b
+}
+func nullInt64Ptr(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	n := v.Int64
+	return &n
 }
 func knownStatus(s Status) bool {
 	switch s {

@@ -58,6 +58,53 @@ type Task struct {
 	PID               *int
 	PGID              *int
 	ProcessStartTicks *int64
+
+	// The fields below are the outcome summary (migration 005). All are nil
+	// ("absent") for every row created before this migration and for any
+	// task reconciled after a restart, since reconciliation never attaches a
+	// live parser to produce one. A caller must treat absence as "no live
+	// summary was ever flushed," never guess a value from it.
+	FinalText          string
+	FinalTextTruncated *bool
+	// Outcome is one of "completed", "stalled_max_turns",
+	// "no_complete_event", "process_failed", or "" (absent — never derived
+	// lazily; a caller computes its own exit-code-only fallback for absent
+	// rows instead of this field guessing one).
+	Outcome          string
+	CompleteSeen     *bool
+	TotalTokens      *int64
+	InputTokens      *int64
+	OutputTokens     *int64
+	CacheReadTokens  *int64
+	CacheWriteTokens *int64
+	CostUSD          *float64
+	ToolCallCount    *int64
+	LastEventAt      *time.Time
+	StalledMaxTurns  *bool
+	StdoutTruncated  *bool
+	BytesDropped     *int64
+}
+
+// OutcomeSummary is the plain-primitive input to Store.RecordOutcomeSummary.
+// It intentionally does not reference internal/logs.Snapshot or any other
+// package's type, so internal/tasks gains no new dependency: the call site
+// that owns a logs.Snapshot translates it into this struct.
+type OutcomeSummary struct {
+	FinalText          string
+	FinalTextTruncated bool
+	Outcome            string
+	CompleteSeen       bool
+	TotalTokens        int64
+	InputTokens        int64
+	OutputTokens       int64
+	CacheReadTokens    int64
+	CacheWriteTokens   int64
+	CostUSD            float64
+	ToolCallCount      int64
+	LastEventAt        time.Time
+	StalledMaxTurns    bool
+	StdoutTruncated    bool
+	BytesDropped       int64
 }
 
 // CanonicalParameters returns the deterministic encoding persisted for a
