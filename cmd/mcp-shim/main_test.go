@@ -126,7 +126,7 @@ func newFakeGoose(t *testing.T) (binary, recipeRoot string) {
 	}
 	recipeRoot = t.TempDir()
 	for _, fixture := range []string{"success.yaml", "sleep.yaml"} {
-		if err := os.WriteFile(filepath.Join(recipeRoot, fixture), []byte("title: fixture\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(recipeRoot, fixture), []byte("title: fixture\nprompt: Run fixture.\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

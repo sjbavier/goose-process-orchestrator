@@ -11,12 +11,17 @@ import (
 )
 
 type fakeService struct {
-	task         tasks.Task
-	spawnCtx     context.Context
-	spawnRequest scheduler.SpawnRequest
-	sentMessage  *tasks.Message
+	task                      tasks.Task
+	spawnCtx                  context.Context
+	spawnRequest              scheduler.SpawnRequest
+	sentMessage               *tasks.Message
+	listStatus, listKeyPrefix string
+	listLimit                 int
 }
 
+func (f *fakeService) ServerInfo(context.Context) (scheduler.ServerInfo, error) {
+	return scheduler.ServerInfo{}, nil
+}
 func (f *fakeService) Spawn(ctx context.Context, r scheduler.SpawnRequest) (tasks.Task, error) {
 	f.spawnCtx = ctx
 	f.spawnRequest = r
@@ -28,7 +33,8 @@ func (f *fakeService) Outcome(context.Context, string) (scheduler.OutcomeResult,
 	return scheduler.OutcomeResult{Task: f.task}, nil
 }
 func (f *fakeService) Cancel(context.Context, string) (tasks.Task, error) { return f.task, nil }
-func (f *fakeService) List(context.Context, string, int) ([]tasks.Task, error) {
+func (f *fakeService) List(_ context.Context, status, keyPrefix string, limit int) ([]tasks.Task, error) {
+	f.listStatus, f.listKeyPrefix, f.listLimit = status, keyPrefix, limit
 	return []tasks.Task{f.task}, nil
 }
 func (f *fakeService) Logs(context.Context, string, string, int) (scheduler.LogsResult, error) {
@@ -62,16 +68,19 @@ func TestOnlyApprovedToolsAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 8 {
-		t.Fatalf("tools=%d, want 8", len(list.Tools))
+	if len(list.Tools) != 9 {
+		t.Fatalf("tools=%d, want 9", len(list.Tools))
 	}
 	for _, call := range []struct {
 		name string
 		args map[string]any
-	}{{"spawn", map[string]any{"recipe": "allowed.yaml", "idempotency_key": "one"}}, {"status", map[string]any{"id": "task-1"}}, {"result", map[string]any{"id": "task-1"}}, {"cancel", map[string]any{"id": "task-1"}}, {"list", map[string]any{}}, {"list", map[string]any{"status": "queued", "limit": 10}}, {"logs", map[string]any{"id": "task-1"}}, {"logs", map[string]any{"id": "task-1", "stream": "stdout", "max_bytes": 100}}, {"progress", map[string]any{"id": "task-1"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello", "kind": "note"}}} {
+	}{{"server_info", map[string]any{}}, {"spawn", map[string]any{"recipe": "allowed.yaml", "idempotency_key": "one"}}, {"status", map[string]any{"id": "task-1"}}, {"result", map[string]any{"id": "task-1"}}, {"cancel", map[string]any{"id": "task-1"}}, {"list", map[string]any{}}, {"list", map[string]any{"status": "queued", "key_prefix": "ENG-29341:", "limit": 10}}, {"logs", map[string]any{"id": "task-1"}}, {"logs", map[string]any{"id": "task-1", "stream": "stdout", "max_bytes": 100}}, {"progress", map[string]any{"id": "task-1"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello", "kind": "note"}}} {
 		if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: call.name, Arguments: call.args}); err != nil {
 			t.Fatalf("%s: %v", call.name, err)
 		}
+	}
+	if f.listStatus != "queued" || f.listKeyPrefix != "ENG-29341:" || f.listLimit != 10 {
+		t.Fatalf("list filters = (%q, %q, %d)", f.listStatus, f.listKeyPrefix, f.listLimit)
 	}
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "spawn", Arguments: map[string]any{"recipe": "allowed.yaml"}}); err != nil {
 		t.Fatalf("invalid request is a tool result, not protocol failure: %v", err)

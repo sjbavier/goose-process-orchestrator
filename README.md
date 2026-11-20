@@ -157,16 +157,28 @@ Two deliberate limits worth knowing:
 - **Parameters never appear in a response.** `status`, `result`, and `list`
   omit them by design; a caller already holds the values it sent, and
   responses are the widest-read surface here.
-- **Declarations are only consulted when you send parameters.** A `spawn`
-  with no `parameters` behaves exactly as it did before this feature, even if
-  the recipe declares required parameters — that request still reaches
-  `goose run`, which rejects it. Send at least one parameter and the whole
-  declaration contract applies.
+- **Every spawn validates that the recipe has a non-empty top-level `prompt`.**
+  Prompt-less recipes are rejected before capacity is reserved or an
+  idempotency key is consumed, because headless `goose run --recipe` cannot
+  supply the missing prompt separately. Parameter declarations are also
+  checked at this admission boundary, including required keys.
 
 A task's parameters are part of its durable identity: replaying one
 `idempotency_key` with a different parameter map is a conflict rather than a
 silent reuse of a task that would run different inputs. Key order never
 matters, because the stored form is canonical.
+
+`list` includes each task's caller-chosen `idempotency_key` and accepts an
+optional `key_prefix` filter. Use a stable logical prefix (for example
+`ENG-29341:`) to rediscover task IDs after compaction; the prefix is matched
+literally and can be combined with the existing status filter.
+
+`server_info` reports the configured recipe root, workdir, runs directory,
+Goose binary and its startup-cached `--version` output, turn/concurrency
+limits, current queued/running counts, mailbox and output-limit settings,
+retention policy, daemon start time, and GPO build version/commit when the Go
+build metadata provides them. A failed Goose version probe leaves only
+`goose_version` empty; it does not prevent server startup.
 
 `--sub-recipe` remains unsupported.
 

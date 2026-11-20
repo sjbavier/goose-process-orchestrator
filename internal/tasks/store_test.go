@@ -518,3 +518,22 @@ func TestRecordOutcomeSummaryRoundTripsEveryFieldAndLeavesOtherColumnsUntouched(
 		t.Fatalf("RecordOutcomeSummary(missing id) = %v, want ErrNotFound", err)
 	}
 }
+
+func TestStoreListFiltersByLiteralIdempotencyKeyPrefix(t *testing.T) {
+	_, store := openSQLiteStore(t)
+	ctx := context.Background()
+	for i, key := range []string{"ENG-29341:plan", "ENG-29341:build", "ENGX29341:other"} {
+		id := fmt.Sprintf("prefix-%d", i)
+		if _, _, err := store.Create(ctx, Task{ID: id, Recipe: "allowed.yaml", IdempotencyKey: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.List(ctx, ListFilter{KeyPrefix: "ENG-29341:", Limit: 10})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("List(key prefix) = (%+v, %v), want 2", got, err)
+	}
+	got, err = store.List(ctx, ListFilter{KeyPrefix: "ENG%", Limit: 10})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("wildcard-like prefix must be literal: (%+v, %v)", got, err)
+	}
+}

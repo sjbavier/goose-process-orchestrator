@@ -214,27 +214,27 @@ func TestServiceListValidatesStatusAndClampsLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	all, err := service.List(context.Background(), "", 0)
+	all, err := service.List(context.Background(), "", "", 0)
 	if err != nil || len(all) != 3 {
 		t.Fatalf("List(no filter, limit 0) = (%d, %v), want 3 tasks and no error", len(all), err)
 	}
 
-	limited, err := service.List(context.Background(), "", 2)
+	limited, err := service.List(context.Background(), "", "", 2)
 	if err != nil || len(limited) != 2 {
 		t.Fatalf("List(limit=2) = (%d, %v), want 2 tasks", len(limited), err)
 	}
 
-	overMax, err := service.List(context.Background(), "", maxListLimit+1000)
+	overMax, err := service.List(context.Background(), "", "", maxListLimit+1000)
 	if err != nil || len(overMax) != 3 {
 		t.Fatalf("List(limit over max) = (%d, %v), want clamp to not error and still return all 3", len(overMax), err)
 	}
 
-	queued, err := service.List(context.Background(), "queued", 0)
+	queued, err := service.List(context.Background(), "queued", "", 0)
 	if err != nil || len(queued) != 3 {
 		t.Fatalf("List(status=queued) = (%d, %v), want 3 tasks", len(queued), err)
 	}
 
-	if _, err := service.List(context.Background(), "not-a-real-status", 0); !errors.Is(err, ErrInvalidStatus) {
+	if _, err := service.List(context.Background(), "not-a-real-status", "", 0); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("List(invalid status) = %v, want ErrInvalidStatus", err)
 	}
 }

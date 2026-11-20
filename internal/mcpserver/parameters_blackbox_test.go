@@ -20,6 +20,8 @@ import (
 )
 
 const declaredRecipeBody = `title: acceptance
+prompt: |
+  Run the declared acceptance recipe.
 parameters:
   - key: feature_slug
     input_type: string

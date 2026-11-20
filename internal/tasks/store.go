@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite"
@@ -206,18 +207,27 @@ func (s *Store) requestCancelOnce(ctx context.Context, id string) (Task, error) 
 // is the exact row cap the caller wants applied; List does not know about
 // any server-side maximum policy, so callers must resolve that first.
 type ListFilter struct {
-	Status *Status
-	Limit  int
+	Status    *Status
+	KeyPrefix string
+	Limit     int
 }
 
 // List returns tasks newest first (by created_at, then id, both descending),
 // optionally filtered by status, capped at filter.Limit rows.
 func (s *Store) List(ctx context.Context, filter ListFilter) ([]Task, error) {
 	query := taskColumnsSQL + ` FROM tasks`
-	args := make([]any, 0, 2)
+	args := make([]any, 0, 3)
+	conditions := make([]string, 0, 2)
 	if filter.Status != nil {
-		query += ` WHERE status = ?`
+		conditions = append(conditions, `status = ?`)
 		args = append(args, *filter.Status)
+	}
+	if filter.KeyPrefix != "" {
+		conditions = append(conditions, `substr(idempotency_key, 1, length(?)) = ?`)
+		args = append(args, filter.KeyPrefix, filter.KeyPrefix)
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, filter.Limit)
@@ -235,6 +245,19 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Task, error) {
 		result = append(result, task)
 	}
 	return result, rows.Err()
+}
+
+// CountStatuses returns exact durable row counts for the requested statuses.
+func (s *Store) CountStatuses(ctx context.Context, statuses ...Status) (map[Status]int, error) {
+	counts := make(map[Status]int, len(statuses))
+	for _, status := range statuses {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = ?`, status).Scan(&count); err != nil {
+			return nil, err
+		}
+		counts[status] = count
+	}
+	return counts, nil
 }
 
 // ListNonTerminal returns every task row whose status is not one of

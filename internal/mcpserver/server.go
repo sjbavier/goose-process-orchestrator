@@ -14,11 +14,12 @@ import (
 type Service interface {
 	Spawn(context.Context, scheduler.SpawnRequest) (tasks.Task, error)
 	Cancel(context.Context, string) (tasks.Task, error)
-	List(ctx context.Context, status string, limit int) ([]tasks.Task, error)
+	List(ctx context.Context, status, keyPrefix string, limit int) ([]tasks.Task, error)
 	Logs(ctx context.Context, id, stream string, maxBytes int) (scheduler.LogsResult, error)
 	Progress(ctx context.Context, id string) (scheduler.ProgressResult, error)
 	Outcome(ctx context.Context, id string) (scheduler.OutcomeResult, error)
 	SendMessage(ctx context.Context, id, body, kind string) (tasks.Message, error)
+	ServerInfo(context.Context) (scheduler.ServerInfo, error)
 }
 type SpawnInput struct {
 	Recipe         string `json:"recipe"`
@@ -37,6 +38,27 @@ type SpawnInput struct {
 	// sender to message this task's inbox.
 	InboxPolicy string `json:"inbox_policy,omitempty"`
 }
+type ServerInfoInput struct{}
+type ServerInfoOutput struct {
+	RecipeRoot      string `json:"recipe_root"`
+	Workdir         string `json:"workdir,omitempty"`
+	RunsDir         string `json:"runs_dir"`
+	GooseBinary     string `json:"goose_binary"`
+	GooseVersion    string `json:"goose_version,omitempty"`
+	MaxTurns        int    `json:"max_turns"`
+	MaxTurnsCeiling int    `json:"max_turns_ceiling"`
+	MaxConcurrent   int    `json:"max_concurrent"`
+	Queued          int    `json:"queued"`
+	Running         int    `json:"running"`
+	MailboxEnabled  bool   `json:"mailbox_enabled"`
+	OutputLimit     int64  `json:"output_limit"`
+	RunsMaxAge      string `json:"runs_max_age"`
+	RunsMaxCount    int    `json:"runs_max_count"`
+	GPOVersion      string `json:"gpo_version,omitempty"`
+	GPOCommit       string `json:"gpo_commit,omitempty"`
+	DaemonStartedAt string `json:"daemon_started_at"`
+}
+
 type IDInput struct {
 	ID string `json:"id"`
 }
@@ -74,6 +96,8 @@ type TaskOutput struct {
 type ListInput struct {
 	// Status, when non-empty, filters to exactly that task status.
 	Status string `json:"status,omitempty"`
+	// KeyPrefix filters to caller-chosen idempotency keys beginning with this value.
+	KeyPrefix string `json:"key_prefix,omitempty"`
 	// Limit bounds how many tasks are returned; non-positive or omitted
 	// means the server default, and any value is still capped at the
 	// server-side maximum.
@@ -81,6 +105,7 @@ type ListInput struct {
 }
 type TaskListItem struct {
 	ID              string `json:"id"`
+	IdempotencyKey  string `json:"idempotency_key"`
 	Recipe          string `json:"recipe"`
 	Status          string `json:"status"`
 	CreatedAt       string `json:"created_at"`
@@ -187,6 +212,7 @@ func outcomeOutput(r scheduler.OutcomeResult) TaskOutput {
 func listItem(t tasks.Task) TaskListItem {
 	return TaskListItem{
 		ID:              t.ID,
+		IdempotencyKey:  t.IdempotencyKey,
 		Recipe:          t.Recipe,
 		Status:          string(t.Status),
 		CreatedAt:       t.CreatedAt.Format(time.RFC3339),
@@ -224,6 +250,13 @@ func New(service Service) (*mcp.Server, error) {
 		return nil, errors.New("service is required")
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "goose-process-orchestrator", Version: "0.1.0"}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "server_info", Description: "Read server configuration, cached Goose version, capacity, feature flags, retention, and current queue counts."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ ServerInfoInput) (*mcp.CallToolResult, ServerInfoOutput, error) {
+		info, e := service.ServerInfo(ctx)
+		if e != nil {
+			return nil, ServerInfoOutput{}, fmt.Errorf("server_info: %w", e)
+		}
+		return nil, ServerInfoOutput{RecipeRoot: info.RecipeRoot, Workdir: info.Workdir, RunsDir: info.RunsDir, GooseBinary: info.GooseBinary, GooseVersion: info.GooseVersion, MaxTurns: info.MaxTurns, MaxTurnsCeiling: info.MaxTurnsCeiling, MaxConcurrent: info.MaxConcurrent, Queued: info.Queued, Running: info.Running, MailboxEnabled: info.MailboxEnabled, OutputLimit: info.OutputLimit, RunsMaxAge: info.RunsMaxAge.String(), RunsMaxCount: info.RunsMaxCount, GPOVersion: info.GPOVersion, GPOCommit: info.GPOCommit, DaemonStartedAt: info.DaemonStartedAt.Format(time.RFC3339)}, nil
+	})
 	mcp.AddTool(s, &mcp.Tool{Name: "spawn", Description: "Queue an approved recipe. Optional max_turns overrides the server's default turn limit for this one task. Optional parameters supplies the recipe's declared string parameters; never pass secrets, because values are persisted locally and written to run artifacts. Optional inbox_policy selects the task's mailbox policy (\"controller_only\", the default, or \"open\")."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SpawnInput) (*mcp.CallToolResult, TaskOutput, error) {
 		// A client transport/request lifecycle is not task ownership. Detach only
 		// cancellation so a stdio disconnect cannot cancel a successfully queued task.
@@ -255,7 +288,7 @@ func New(service Service) (*mcp.Server, error) {
 		return nil, output(t), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "list", Description: "List tasks newest first, with optional status filter and bounded limit. Use this to rediscover task IDs when they were lost (chat compaction, new session, different client)."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListInput) (*mcp.CallToolResult, ListOutput, error) {
-		ts, e := service.List(ctx, in.Status, in.Limit)
+		ts, e := service.List(ctx, in.Status, in.KeyPrefix, in.Limit)
 		if e != nil {
 			return nil, ListOutput{}, fmt.Errorf("list: %w", e)
 		}

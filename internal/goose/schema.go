@@ -45,6 +45,7 @@ type Declaration struct {
 // recipeSchema is the minimal view of a recipe document.
 type recipeSchema struct {
 	Parameters []Declaration `yaml:"parameters"`
+	Prompt     string        `yaml:"prompt"`
 }
 
 // LoadDeclarations reads an already containment-checked recipe path and returns
@@ -90,16 +91,44 @@ func (c Config) ValidateRequest(recipe string, params map[string]string) error {
 	if err := ValidateParameterShape(params); err != nil {
 		return err
 	}
-	if len(params) == 0 {
-		// Preserve pre-feature behavior exactly: a parameterless request does
-		// not newly depend on this package being able to decode the recipe.
-		return nil
-	}
 	resolved, err := approvedFile(c.RecipeRoot, recipe)
 	if err != nil {
 		return err
 	}
-	return validateDeclaredParameters(resolved, params)
+	declarations, err := loadRunnableRecipe(resolved)
+	if err != nil {
+		return err
+	}
+	return validateAgainstDeclarations(declarations, params)
+}
+
+// loadRunnableRecipe verifies the recipe can run through Goose's headless
+// --recipe path and returns its parameter declarations. A blank prompt is an
+// admission error because Goose cannot supply one separately in this mode.
+func loadRunnableRecipe(recipePath string) ([]Declaration, error) {
+	file, err := os.Open(recipePath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecipeSchema, err)
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, MaxRecipeBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecipeSchema, err)
+	}
+	if len(contents) > MaxRecipeBytes {
+		return nil, fmt.Errorf("%w: recipe exceeds the %d byte limit", ErrRecipeSchema, MaxRecipeBytes)
+	}
+	var schema recipeSchema
+	if err := yaml.Unmarshal(contents, &schema); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecipeSchema, err)
+	}
+	if strings.TrimSpace(schema.Prompt) == "" {
+		return nil, fmt.Errorf("%w: recipe has no prompt; headless goose run requires one", ErrRecipeSchema)
+	}
+	if _, err := LoadDeclarations(recipePath); err != nil {
+		return nil, err
+	}
+	return schema.Parameters, nil
 }
 
 // validateDeclaredParameters is the declaration half of the contract, for

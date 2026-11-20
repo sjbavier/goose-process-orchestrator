@@ -31,6 +31,7 @@ type Store interface {
 	Get(context.Context, string) (tasks.Task, error)
 	RequestCancel(context.Context, string) (tasks.Task, error)
 	List(context.Context, tasks.ListFilter) ([]tasks.Task, error)
+	CountStatuses(context.Context, ...tasks.Status) (map[tasks.Status]int, error)
 	Enqueue(ctx context.Context, taskID, sender, kind, body string) (tasks.Message, error)
 }
 
@@ -45,7 +46,8 @@ type Service struct {
 	runsRoot string
 	// validator is nil unless WithParameterValidator enabled recipe
 	// parameters; a nil validator makes any parameterized request fail closed.
-	validator ParameterValidator
+	validator  ParameterValidator
+	serverInfo ServerInfo
 }
 
 // ParameterValidator rejects a request's recipe parameters at admission time,
@@ -63,6 +65,23 @@ type Option func(*Service)
 // one it cannot validate.
 func WithParameterValidator(validator ParameterValidator) Option {
 	return func(s *Service) { s.validator = validator }
+}
+
+// ServerInfo is immutable startup configuration plus dynamic queue counts.
+type ServerInfo struct {
+	RecipeRoot, Workdir, RunsDir, GooseBinary, GooseVersion string
+	MaxTurns, MaxTurnsCeiling, MaxConcurrent                int
+	MailboxEnabled                                          bool
+	OutputLimit                                             int64
+	RunsMaxAge                                              time.Duration
+	RunsMaxCount                                            int
+	GPOVersion, GPOCommit                                   string
+	DaemonStartedAt                                         time.Time
+	Queued, Running                                         int
+}
+
+func WithServerInfo(info ServerInfo) Option {
+	return func(s *Service) { s.serverInfo = info }
 }
 
 func NewService(store Store, scheduler *Scheduler, newID func() string, runsRoot string, opts ...Option) (*Service, error) {
@@ -101,16 +120,16 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	if request.Recipe == "" || request.IdempotencyKey == "" {
 		return tasks.Task{}, ErrInvalidRequest
 	}
-	// Parameters are validated before Reserve, so an invalid request consumes
-	// no capacity, creates no task row, and starts no process. A service with
-	// no validator fails closed rather than admitting unvalidated parameters.
-	if len(request.Parameters) > 0 {
-		if s.validator == nil {
+	// Recipe and parameter validation runs before Reserve, so a prompt-less or
+	// otherwise invalid request consumes no capacity, creates no task row, and
+	// starts no process. A service without a validator preserves parameterless
+	// library/test use, but still fails closed for supplied parameters.
+	if s.validator == nil {
+		if len(request.Parameters) > 0 {
 			return tasks.Task{}, fmt.Errorf("%w: recipe parameters are not enabled on this server", ErrInvalidRequest)
 		}
-		if err := s.validator.ValidateRequest(request.Recipe, request.Parameters); err != nil {
-			return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
-		}
+	} else if err := s.validator.ValidateRequest(request.Recipe, request.Parameters); err != nil {
+		return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	inboxPolicy := tasks.InboxPolicy(request.InboxPolicy)
 	if inboxPolicy != "" && !tasks.KnownInboxPolicy(inboxPolicy) {
@@ -126,6 +145,17 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	}
 	s.scheduler.Enqueue()
 	return task, nil
+}
+
+func (s *Service) ServerInfo(ctx context.Context) (ServerInfo, error) {
+	counts, err := s.store.CountStatuses(ctx, tasks.Queued, tasks.Starting, tasks.Running)
+	if err != nil {
+		return ServerInfo{}, err
+	}
+	info := s.serverInfo
+	info.Queued = counts[tasks.Queued]
+	info.Running = counts[tasks.Starting] + counts[tasks.Running]
+	return info, nil
 }
 
 func (s *Service) Status(ctx context.Context, id string) (tasks.Task, error) {
@@ -163,7 +193,7 @@ var listableStatuses = map[string]tasks.Status{
 // min(limit, maxListLimit). limit <= 0 defaults to maxListLimit. An empty
 // status means no filter; a non-empty, unrecognized status is rejected
 // rather than silently returning no rows.
-func (s *Service) List(ctx context.Context, status string, limit int) ([]tasks.Task, error) {
+func (s *Service) List(ctx context.Context, status, keyPrefix string, limit int) ([]tasks.Task, error) {
 	filter := tasks.ListFilter{}
 	if status != "" {
 		known, ok := listableStatuses[status]
@@ -175,6 +205,7 @@ func (s *Service) List(ctx context.Context, status string, limit int) ([]tasks.T
 	if limit <= 0 || limit > maxListLimit {
 		limit = maxListLimit
 	}
+	filter.KeyPrefix = keyPrefix
 	filter.Limit = limit
 	return s.store.List(ctx, filter)
 }

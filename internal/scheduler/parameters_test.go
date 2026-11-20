@@ -51,7 +51,7 @@ func TestSpawnValidatesParametersBeforeReservingCapacity(t *testing.T) {
 	}
 	// No capacity was consumed and no task row exists: the single-slot
 	// scheduler must still admit a subsequent valid request.
-	if listed, err := service.List(ctx, "", 100); err != nil || len(listed) != 0 {
+	if listed, err := service.List(ctx, "", "", 100); err != nil || len(listed) != 0 {
 		t.Fatalf("rejected request left %d task rows (err %v)", len(listed), err)
 	}
 	validator.err = nil
@@ -112,4 +112,31 @@ func TestSpawnWithoutAValidatorFailsClosed(t *testing.T) {
 
 func errorsContains(err error, substring string) bool {
 	return err != nil && strings.Contains(err.Error(), substring)
+}
+
+func TestSpawnValidatesParameterlessRecipeBeforeReservingCapacity(t *testing.T) {
+	store := testStore(t)
+	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
+	defer close(runner.release)
+	sched, err := New(store, runner, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := &recordingValidator{err: errors.New("recipe has no prompt; headless goose run requires one")}
+	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(validator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = service.Spawn(ctx, SpawnRequest{Recipe: "promptless.yaml", IdempotencyKey: "k1"})
+	if !errors.Is(err, ErrInvalidRequest) || !errorsContains(err, "recipe has no prompt") {
+		t.Fatalf("Spawn(prompt-less) = %v", err)
+	}
+	if validator.calls != 1 || validator.recipe != "promptless.yaml" {
+		t.Fatalf("validator calls = %d with %q", validator.calls, validator.recipe)
+	}
+	listed, listErr := service.List(ctx, "", "", 100)
+	if listErr != nil || len(listed) != 0 {
+		t.Fatalf("rejected request left %d rows (err %v)", len(listed), listErr)
+	}
 }

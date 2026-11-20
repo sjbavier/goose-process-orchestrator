@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,6 +99,7 @@ func main() {
 		}
 	}
 	config := serverConfig{
+		daemonStartedAt:        time.Now().UTC(),
 		dbPath:                 *dbPath,
 		recipeRoot:             *recipeRoot,
 		gooseBinary:            *gooseBinary,
@@ -190,7 +194,8 @@ type serverConfig struct {
 	// (main rejects it); a zero value here falls back to
 	// artifacts.DefaultOutputLimit, matching artifacts.Manager's own
 	// permissive behavior for direct library callers.
-	outputLimit int64
+	outputLimit     int64
+	daemonStartedAt time.Time
 }
 
 // newServer constructs the service/scheduler/store exactly once and wraps it
@@ -275,9 +280,22 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 		db.Close()
 		return nil, nil, nil, nil, err
 	}
+	// Cache environment/version discovery once at startup; server_info never
+	// shells out on a request path. A failed Goose version probe is surfaced as
+	// an empty version without preventing otherwise valid local operation.
+	gooseVersion := ""
+	if output, probeErr := exec.Command(config.gooseBinary, "--version").CombinedOutput(); probeErr == nil {
+		gooseVersion = strings.TrimSpace(string(output))
+	}
+	gpoVersion, gpoCommit := buildIdentity()
+	startedAt := config.daemonStartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	info := scheduler.ServerInfo{RecipeRoot: config.recipeRoot, Workdir: config.workdir, RunsDir: config.runsDir, GooseBinary: config.gooseBinary, GooseVersion: gooseVersion, MaxTurns: config.maxTurns, MaxTurnsCeiling: config.maxTurnsCeiling, MaxConcurrent: config.maxConcurrent, MailboxEnabled: config.mailboxExtensionBinary != "", OutputLimit: config.outputLimit, RunsMaxAge: config.retention.MaxAge, RunsMaxCount: config.retention.MaxCount, GPOVersion: gpoVersion, GPOCommit: gpoCommit, DaemonStartedAt: startedAt}
 	// The launcher's own Config is the parameter validator, so admission and
 	// the eventual argv are governed by one contract against one recipe root.
-	service, err := scheduler.NewService(store, sched, func() string { return fmt.Sprintf("task-%d", time.Now().UTC().UnixNano()) }, config.runsDir, scheduler.WithParameterValidator(launcher.Config))
+	service, err := scheduler.NewService(store, sched, func() string { return fmt.Sprintf("task-%d", time.Now().UTC().UnixNano()) }, config.runsDir, scheduler.WithParameterValidator(launcher.Config), scheduler.WithServerInfo(info))
 	if err != nil {
 		db.Close()
 		return nil, nil, nil, nil, err
@@ -296,6 +314,24 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 		retention.Loop(ctx, sweeper, config.sweepInterval, logSweep)
 	}
 	return server, start, startMailbox, func() { db.Close() }, nil
+}
+
+func buildIdentity() (version, commit string) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", ""
+	}
+	version = info.Main.Version
+	if version == "(devel)" {
+		version = ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			commit = setting.Value
+			break
+		}
+	}
+	return version, commit
 }
 
 // logSweep reports each sweep on stderr, which is where this command's other

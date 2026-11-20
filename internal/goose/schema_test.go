@@ -210,14 +210,11 @@ func TestBuildRejectsUndeclaredParametersBeforeLaunch(t *testing.T) {
 	}
 }
 
-// TestBuildWithoutParametersDoesNotRequireAParsableRecipe pins the
-// compatibility seam: a request that passes no parameters behaves exactly as it
-// did before this feature, including for a recipe this package cannot decode.
-// Recipe-schema authority is only exercised when a caller actually supplies
-// parameters.
+// Direct Build callers preserve their historical behavior; spawn admission is
+// the fail-fast boundary for prompt validation.
 func TestBuildWithoutParametersDoesNotRequireAParsableRecipe(t *testing.T) {
 	if _, err := buildWithRecipe(t, "just a scalar\n", nil); err != nil {
-		t.Fatalf("a parameterless request must not newly depend on recipe parsing: %v", err)
+		t.Fatalf("a parameterless direct Build must preserve compatibility: %v", err)
 	}
 }
 
@@ -261,4 +258,24 @@ func FuzzLoadDeclarations(f *testing.F) {
 			seen[declaration.Key] = true
 		}
 	})
+}
+
+func TestValidateRequestRejectsPromptlessRecipe(t *testing.T) {
+	root := t.TempDir()
+	withoutPrompt := filepath.Join(root, "without.yaml")
+	if err := os.WriteFile(withoutPrompt, []byte("version: 1.0.0\ntitle: no-prompt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{RecipeRoot: root}
+	err := config.ValidateRequest(withoutPrompt, nil)
+	if !errors.Is(err, ErrRecipeSchema) || !strings.Contains(err.Error(), "recipe has no prompt; headless goose run requires one") {
+		t.Fatalf("ValidateRequest(prompt-less) = %v", err)
+	}
+	withPrompt := filepath.Join(root, "with.yaml")
+	if err := os.WriteFile(withPrompt, []byte("version: 1.0.0\nprompt: |\n  Run this recipe.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.ValidateRequest(withPrompt, nil); err != nil {
+		t.Fatalf("ValidateRequest(with prompt) = %v", err)
+	}
 }
