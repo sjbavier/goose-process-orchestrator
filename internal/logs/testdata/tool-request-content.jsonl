@@ -1,0 +1,4 @@
+{"type":"message","message":{"id":"m1","role":"assistant","created":1,"content":[{"type":"toolRequest","id":"call_a","name":"shell"},{"type":"text","text":"first"}]}}
+{"type":"message","message":{"id":"m1","role":"assistant","created":1,"content":[{"type":"toolRequest","id":"call_a","name":"shell"}]}}
+{"type":"message","message":{"id":"m2","role":"user","created":2,"content":[{"type":"toolResponse","id":"call_a"}]}}
+{"type":"message","message":{"id":"m3","role":"assistant","created":3,"content":[{"type":"toolRequest","id":"call_b","name":"read"},{"type":"toolRequest","id":"call_c","name":"read"},{"type":"text","text":"done"}]}}

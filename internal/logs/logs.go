@@ -119,6 +119,7 @@ type messageEvent struct {
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
+			ID   string `json:"id"`
 		} `json:"content"`
 		Metadata struct {
 			Inference struct {
@@ -187,23 +188,13 @@ func ParseProgress(raw []byte) Progress {
 					b.WriteString(c.Text)
 				}
 			}
-			if inference := msg.Message.Metadata.Inference; inference.Provider != "" || inference.RequestedModel != "" {
-				if inference.Provider != "" {
-					p.Provider = inference.Provider
-				}
-				if inference.RequestedModel != "" {
-					p.Model = inference.RequestedModel
-				}
-			}
+			applyInference(&p, msg)
 		case "complete":
 			var c completeEvent
 			if err := json.Unmarshal(line, &c); err != nil {
 				continue
 			}
-			p.Complete = true
-			p.TotalTokens, p.InputTokens, p.OutputTokens = c.TotalTokens, c.InputTokens, c.OutputTokens
-			p.CacheReadTokens, p.CacheWriteTokens = c.CacheReadInputTokens, c.CacheWriteInputTokens
-			p.CostUSD = c.CostUSD
+			applyComplete(&p, c)
 		default:
 			// Unknown event type, including any undocumented tool-call
 			// shape: skipped, not fatal.
@@ -213,6 +204,27 @@ func ParseProgress(raw []byte) Progress {
 		p.LastAssistantText = boundText(fragments[order[n-1]].String(), MaxAssistantTextBytes)
 	}
 	return p
+}
+
+// applyInference records provider/model from an assistant message's
+// metadata. Shared by ParseProgress and Incremental so they cannot diverge.
+func applyInference(p *Progress, msg messageEvent) {
+	inference := msg.Message.Metadata.Inference
+	if inference.Provider != "" {
+		p.Provider = inference.Provider
+	}
+	if inference.RequestedModel != "" {
+		p.Model = inference.RequestedModel
+	}
+}
+
+// applyComplete records a "complete" event's totals. Shared by ParseProgress
+// and Incremental so they cannot diverge.
+func applyComplete(p *Progress, c completeEvent) {
+	p.Complete = true
+	p.TotalTokens, p.InputTokens, p.OutputTokens = c.TotalTokens, c.InputTokens, c.OutputTokens
+	p.CacheReadTokens, p.CacheWriteTokens = c.CacheReadInputTokens, c.CacheWriteInputTokens
+	p.CostUSD = c.CostUSD
 }
 
 func boundText(s string, maxBytes int) string {
