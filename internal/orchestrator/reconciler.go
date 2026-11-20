@@ -67,7 +67,11 @@ func reconcileOne(ctx context.Context, store *tasks.Store, runner *Runner, row t
 		runner.register(row.ID, adopted)
 		go func() {
 			defer runner.unregister(row.ID)
-			runner.awaitAndReport(ctx, row.ID, adopted, row.Result, cancel)
+			// live is nil: a re-adopted process never had Start called again
+			// in this process's lifetime, so it structurally has no live
+			// parser attached — the new outcome-summary columns stay NULL
+			// for it, per decision D.
+			runner.awaitAndReport(ctx, row.ID, adopted, row.Result, nil, cancel)
 		}()
 		return
 	}

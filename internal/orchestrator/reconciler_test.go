@@ -137,6 +137,31 @@ func readStartTicks(pid int) (int64, error) {
 	return strconv.ParseInt(rest[starttimeIndex], 10, 64)
 }
 
+// TestReconcileReAdoptedTaskNeverGetsALiveOutcomeSummary covers the decision
+// D focused check: a task reconciled via Reconcile that then completes
+// naturally must have every new outcome-summary column stay NULL, proving
+// in practice that reconciliation never attaches a live parser to it.
+func TestReconcileReAdoptedTaskNeverGetsALiveOutcomeSummary(t *testing.T) {
+	store := openReconcileStore(t)
+	pid, ticks := startRealFixture(t, "sleep 0.2")
+	createRunningTask(t, store, "t-readopt-no-summary", pid, pid, ticks)
+
+	runner := New(nil, store)
+	if err := Reconcile(context.Background(), store, runner); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	task := waitForStatus(t, store, "t-readopt-no-summary", tasks.Succeeded, 10*time.Second)
+	if task.FinalText != "" || task.Outcome != "" || task.FinalTextTruncated != nil || task.CompleteSeen != nil ||
+		task.TotalTokens != nil || task.ToolCallCount != nil || task.LastEventAt != nil || task.StalledMaxTurns != nil ||
+		task.StdoutTruncated != nil || task.BytesDropped != nil || task.CostUSD != nil {
+		t.Fatalf("reconciled-then-completed task has non-absent outcome-summary fields: %+v", task)
+	}
+	// Its logs/progress behavior is otherwise unaffected: the existing
+	// reconciler tests above already assert status/registration/Result for
+	// this exact code path and pass unmodified.
+}
+
 func waitForStatus(t *testing.T, store *tasks.Store, id string, want tasks.Status, timeout time.Duration) tasks.Task {
 	t.Helper()
 	deadline := time.After(timeout)

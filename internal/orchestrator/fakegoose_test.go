@@ -31,6 +31,16 @@ case "$name" in
   success.yaml) echo "ok"; exit 0 ;;
   fail.yaml) echo "boom" 1>&2; exit 7 ;;
   sleep.yaml) sleep 30 & wait ;;
+  slow.yaml)
+    i=0
+    while [ $i -lt 6 ]; do
+      printf '{"type":"message","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"part%d "}]}}\n' "$i"
+      sleep 0.3
+      i=$((i + 1))
+    done
+    printf '{"type":"complete","total_tokens":7,"input_tokens":3,"output_tokens":4,"cost_usd":0.001}\n'
+    exit 0
+    ;;
   *) echo "unknown fixture $name" 1>&2; exit 2 ;;
 esac
 `

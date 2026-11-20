@@ -12,6 +12,7 @@ import (
 
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/local/goose-process-orchestrator/internal/goose"
+	"github.com/local/goose-process-orchestrator/internal/logs"
 	"github.com/local/goose-process-orchestrator/internal/mailbox"
 	"github.com/local/goose-process-orchestrator/internal/supervisor"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
@@ -22,16 +23,27 @@ import (
 // poll rather than a schema or interface change.
 const CancelPoll = 200 * time.Millisecond
 
+// flushEveryNTicks throttles the periodic outcome-summary flush inside
+// await's existing select loop to no tighter than CancelPoll itself — a
+// flush every tick would add SQLite write pressure to a loop that already
+// shares its cadence with cancellation polling.
+const flushEveryNTicks = 5
+
 // Store is the subset of tasks.Store this adapter needs.
 type Store interface {
 	Get(ctx context.Context, id string) (tasks.Task, error)
 	Transition(ctx context.Context, id string, next tasks.Status, resultText string, exitCode *int) (tasks.Task, error)
+	RecordOutcomeSummary(ctx context.Context, id string, summary tasks.OutcomeSummary) (tasks.Task, error)
+	RecordFailure(ctx context.Context, id, failure string) (tasks.Task, error)
 }
 
 // Launcher starts and cancels one owned OS process for a validated request.
-// internal/goose.Runner satisfies this directly.
+// internal/goose.Runner satisfies this directly. The *goose.Live return
+// value exposes a live-parsed stdout snapshot and the disk capture's
+// truncation accounting, both independent of the process's own exit; it may
+// be nil only if a test double chooses not to provide one.
 type Launcher interface {
-	Start(request goose.Request, taskID string) (*supervisor.Process, artifacts.Run, error)
+	Start(request goose.Request, taskID string) (*supervisor.Process, artifacts.Run, *goose.Live, error)
 	Cancel(ctx context.Context, p *supervisor.Process) supervisor.Result
 }
 
@@ -74,15 +86,15 @@ func (r *Runner) Run(ctx context.Context, task tasks.Task) {
 	if r.Tokens != nil {
 		token, err := r.Tokens.Mint(task.ID)
 		if err != nil {
-			r.report(ctx, task.ID, tasks.Failed, err.Error(), nil)
+			r.reportLaunchFailure(ctx, task.ID, err)
 			return
 		}
 		request.MailboxToken = token
 		defer r.Tokens.Revoke(task.ID)
 	}
-	p, run, err := r.Launcher.Start(request, task.ID)
+	p, run, live, err := r.Launcher.Start(request, task.ID)
 	if err != nil {
-		r.report(ctx, task.ID, tasks.Failed, err.Error(), nil)
+		r.reportLaunchFailure(ctx, task.ID, err)
 		return
 	}
 
@@ -94,9 +106,23 @@ func (r *Runner) Run(ctx context.Context, task tasks.Task) {
 		fmt.Fprintf(os.Stderr, "orchestrator: task %s: record running status: %v\n", task.ID, err)
 	}
 
-	r.resume(ctx, task.ID, p, run.Dir, func(cancelCtx context.Context) supervisor.Result {
+	r.resume(ctx, task.ID, p, run.Dir, live, func(cancelCtx context.Context) supervisor.Result {
 		return r.Launcher.Cancel(cancelCtx, p)
 	})
+}
+
+// reportLaunchFailure records an orchestrator-level failure that occurs
+// before any process exists and so has no real exit code: Tokens.Mint
+// erroring, or Launcher.Start itself erroring. It keeps the existing
+// Result/Transition behavior byte-identical (resultText == err.Error(), same
+// as before this feature) and additionally records the same text in the new
+// Failure column — the first thing that ever populates it, since a process
+// that starts and later exits non-zero reports via ExitCode/outcome instead.
+func (r *Runner) reportLaunchFailure(ctx context.Context, id string, err error) {
+	r.report(ctx, id, tasks.Failed, err.Error(), nil)
+	if _, ferr := r.Store.RecordFailure(ctx, id, err.Error()); ferr != nil {
+		fmt.Fprintf(os.Stderr, "orchestrator: task %s: record failure: %v\n", id, ferr)
+	}
 }
 
 // resume registers p as the process backing task id, awaits its real exit
@@ -105,18 +131,29 @@ func (r *Runner) Run(ctx context.Context, task tasks.Task) {
 // terminal status to the store using resultText as the stored result. It is
 // the shared register->await->report tail used by Run for a freshly started
 // process, and by Reconcile (via awaitAndReport, below) for a re-adopted one.
-func (r *Runner) resume(ctx context.Context, id string, p handle, resultText string, cancel func(context.Context) supervisor.Result) {
+// live is nil for a re-adopted process (Reconcile never calls
+// goose.Runner.Start again), in which case no outcome summary is ever
+// flushed for it — the new columns stay NULL, exactly as decision D requires.
+func (r *Runner) resume(ctx context.Context, id string, p handle, resultText string, live *goose.Live, cancel func(context.Context) supervisor.Result) {
 	r.register(id, p)
 	defer r.unregister(id)
-	r.awaitAndReport(ctx, id, p, resultText, cancel)
+	r.awaitAndReport(ctx, id, p, resultText, live, cancel)
 }
 
 // awaitAndReport is resume's await+report half, split out so a caller that
 // must guarantee synchronous registration (Reconcile, so a process is
 // immediately cancellable once it returns) can call register itself and run
 // just this half in its own goroutine.
-func (r *Runner) awaitAndReport(ctx context.Context, id string, p handle, resultText string, cancel func(context.Context) supervisor.Result) {
-	result := r.await(ctx, id, p, cancel)
+func (r *Runner) awaitAndReport(ctx context.Context, id string, p handle, resultText string, live *goose.Live, cancel func(context.Context) supervisor.Result) {
+	result := r.await(ctx, id, p, live, cancel)
+
+	// The final summary flush is sequenced strictly before the terminal
+	// report/Transition below, so a caller observing the store never sees a
+	// terminal status without whatever live summary this process produced.
+	if live != nil {
+		live.Flush()
+		r.flushLiveSummary(ctx, id, live)
+	}
 
 	status := tasks.Succeeded
 	switch {
@@ -130,23 +167,76 @@ func (r *Runner) awaitAndReport(ctx context.Context, id string, p handle, result
 }
 
 // await blocks for the process's real exit, cancelling it the first time
-// explicit cancellation intent appears in the store while it is still running.
-func (r *Runner) await(ctx context.Context, id string, p handle, cancel func(context.Context) supervisor.Result) supervisor.Result {
+// explicit cancellation intent appears in the store while it is still
+// running, and (when live is non-nil) flushing a throttled periodic outcome
+// summary so progress/result can observe a long-running task's live state,
+// not only its final one.
+func (r *Runner) await(ctx context.Context, id string, p handle, live *goose.Live, cancel func(context.Context) supervisor.Result) supervisor.Result {
 	done := make(chan supervisor.Result, 1)
 	go func() { done <- p.Wait() }()
 
 	ticker := time.NewTicker(CancelPoll)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case result := <-done:
 			return result
 		case <-ticker.C:
+			ticks++
+			if live != nil && ticks%flushEveryNTicks == 0 {
+				r.flushLiveSummary(ctx, id, live)
+			}
 			current, err := r.Store.Get(ctx, id)
 			if err == nil && current.CancelRequestedAt != nil {
 				return cancel(context.Background())
 			}
 		}
+	}
+}
+
+// flushLiveSummary persists live's current snapshot and capture stats,
+// logging rather than failing the caller if the write itself errors — the
+// same tolerance report already has for its own Transition call.
+func (r *Runner) flushLiveSummary(ctx context.Context, id string, live *goose.Live) {
+	if _, err := r.Store.RecordOutcomeSummary(ctx, id, outcomeSummaryFromLive(live)); err != nil {
+		fmt.Fprintf(os.Stderr, "orchestrator: task %s: record outcome summary: %v\n", id, err)
+	}
+}
+
+// outcomeSummaryFromLive translates a goose.Live snapshot (logs.Snapshot)
+// plus its capture stats into the plain-primitive tasks.OutcomeSummary that
+// Store.RecordOutcomeSummary persists. Outcome itself is deliberately left
+// empty: it is computed from status + CompleteSeen + StalledMaxTurns by the
+// scheduler.Service method that reads these columns back, not stored here,
+// because the correct status (Succeeded/Failed/TimedOut) is not yet known at
+// every point this function runs (a periodic flush happens mid-run).
+//
+// FinalTextTruncated is a best-effort inference, not a field the parser
+// reports directly: Incremental caps assistant text at exactly
+// logs.MaxAssistantTextBytes while accumulating, so text landing exactly on
+// that boundary is treated as truncated. This can at most false-positive on
+// a real message whose length happens to match the cap exactly, never
+// false-negative, matching this feature's documented "under-detect, never
+// over-claim" posture for inferred signals.
+func outcomeSummaryFromLive(live *goose.Live) tasks.OutcomeSummary {
+	snap := live.Snapshot()
+	_, dropped, truncated := live.Stats()
+	return tasks.OutcomeSummary{
+		FinalText:          snap.LastAssistantText,
+		FinalTextTruncated: len(snap.LastAssistantText) >= logs.MaxAssistantTextBytes,
+		CompleteSeen:       snap.Complete,
+		TotalTokens:        snap.TotalTokens,
+		InputTokens:        snap.InputTokens,
+		OutputTokens:       snap.OutputTokens,
+		CacheReadTokens:    snap.CacheReadTokens,
+		CacheWriteTokens:   snap.CacheWriteTokens,
+		CostUSD:            snap.CostUSD,
+		ToolCallCount:      int64(snap.ToolCallCount),
+		LastEventAt:        snap.LastEventAt,
+		StalledMaxTurns:    snap.StalledMaxTurns,
+		StdoutTruncated:    truncated,
+		BytesDropped:       dropped,
 	}
 }
 
