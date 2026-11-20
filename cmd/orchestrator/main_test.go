@@ -686,6 +686,64 @@ func TestBindOrDialRecoversStaleSocket(t *testing.T) {
 	conn.Close()
 }
 
+// TestBindOrDialConcurrentStaleRecoveryExactlyOneOwner proves the race CR-017
+// actually describes: several racers hit EADDRINUSE against a pre-existing
+// stale socket file (nothing listening behind it) at the same time. Without
+// serializing the stale-check/remove/re-bind sequence, two racers could both
+// decide the socket is stale and race to remove+re-bind, letting one delete
+// the other's freshly bound, live socket. Exactly one must win.
+func TestBindOrDialConcurrentStaleRecoveryExactlyOneOwner(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "orch.sock")
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, ok := ln.(*net.UnixListener); ok {
+		u.SetUnlinkOnClose(false)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	type outcome struct {
+		listener net.Listener
+		err      error
+	}
+	results := make(chan outcome, racers)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < racers; i++ {
+		go func() {
+			start.Wait()
+			ln, err := bindOrDial(socketPath)
+			results <- outcome{ln, err}
+		}()
+	}
+	start.Done()
+
+	owners, deferred := 0, 0
+	for i := 0; i < racers; i++ {
+		res := <-results
+		switch {
+		case res.err == nil:
+			owners++
+			defer res.listener.Close()
+		case errors.Is(res.err, errAlreadyOwned):
+			deferred++
+		default:
+			t.Fatalf("racer returned unexpected error: %v", res.err)
+		}
+	}
+	if owners != 1 {
+		t.Fatalf("owners=%d, want exactly 1 (a racer deleted another's live socket)", owners)
+	}
+	if deferred != racers-1 {
+		t.Fatalf("deferred=%d, want %d", deferred, racers-1)
+	}
+}
+
 // TestBindOrDialNeverExposesGroupOrOtherPermissions guards against finding
 // #4: even under a loose inherited umask, the socket file must never exist,
 // even momentarily, with group/other permission bits set, closing the
@@ -957,5 +1015,22 @@ func TestBindOrDialNeverExposesGroupOrOtherPermissions(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("socket file exposed group/other permissions under a loose umask: %v", info.Mode().Perm())
+	}
+}
+
+func TestValidateSocketPathLength(t *testing.T) {
+	atLimit := strings.Repeat("a", maxSocketPathBytes)
+	overLimit := strings.Repeat("a", maxSocketPathBytes+1)
+
+	if err := validateSocketPathLength(atLimit); err != nil {
+		t.Fatalf("path at the %d-byte limit must be accepted, got: %v", maxSocketPathBytes, err)
+	}
+	err := validateSocketPathLength(overLimit)
+	if err == nil {
+		t.Fatalf("path one byte over the %d-byte limit must be rejected", maxSocketPathBytes)
+	}
+	want := fmt.Sprintf("socket path is %d bytes; platform limit is %d", len(overLimit), maxSocketPathBytes)
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
 }

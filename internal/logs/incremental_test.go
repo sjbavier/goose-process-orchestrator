@@ -147,6 +147,19 @@ func TestIncrementalLastEventAtAdvancesOnlyOnRecognizedEvents(t *testing.T) {
 	}
 }
 
+// TestIncrementalLastEventAtIsAlwaysUTC covers CR-018: stamp() normalizes to
+// UTC even when Now returns a time in another Location, so every downstream
+// RFC3339 render ends in Z without needing its own .UTC() call.
+func TestIncrementalLastEventAtIsAlwaysUTC(t *testing.T) {
+	local := time.FixedZone("UTC-5", -5*60*60)
+	inc := Incremental{Now: func() time.Time { return time.Date(2026, 11, 19, 19, 0, 0, 0, local) }}
+	inc.Write(readFixture(t, "malformed.jsonl"))
+	inc.Flush()
+	if loc := inc.Snapshot().LastEventAt.Location(); loc != time.UTC {
+		t.Fatalf("LastEventAt.Location() = %v, want UTC", loc)
+	}
+}
+
 // TestStallMatcherDisabledByDefault documents that, with no confirmed sample
 // of Goose's max-turns stop text in this repository, nothing is matched on a
 // guess: a zero-value parser never reports a stall.
@@ -160,7 +173,7 @@ func TestStallMatcherDisabledByDefault(t *testing.T) {
 }
 
 func TestStallMatcherLatchesOnceMatched(t *testing.T) {
-	inc := Incremental{StallMatcher: func(s string) bool { return strings.Contains(s, "STALL") }}
+	inc := Incremental{StallMatcher: func(s string, _ bool) bool { return strings.Contains(s, "STALL") }}
 	inc.Write([]byte(`{"type":"message","message":{"id":"a","role":"assistant","content":[{"type":"text","text":"working"}]}}` + "\n"))
 	if inc.Snapshot().StalledMaxTurns {
 		t.Fatal("matched too early")
@@ -172,6 +185,39 @@ func TestStallMatcherLatchesOnceMatched(t *testing.T) {
 	inc.Write([]byte(`{"type":"message","message":{"id":"c","role":"assistant","content":[{"type":"text","text":"later text"}]}}` + "\n"))
 	if !inc.Snapshot().StalledMaxTurns {
 		t.Fatal("StalledMaxTurns must never un-set once true")
+	}
+}
+
+// TestDefaultStallMatcherLatchesOnRealSample feeds the confirmed goose
+// 1.53.0 max-turns stop sample through Incremental with DefaultStallMatcher
+// wired in, as production runners wire it.
+func TestDefaultStallMatcherLatchesOnRealSample(t *testing.T) {
+	raw := readFixture(t, "stall-max-turns-goose-1.53.0.jsonl")
+	inc := Incremental{StallMatcher: DefaultStallMatcher}
+	if _, err := inc.Write(raw); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	inc.Flush()
+	snap := inc.Snapshot()
+	if !snap.StalledMaxTurns {
+		t.Fatal("StalledMaxTurns = false, want true on the confirmed stop sample")
+	}
+}
+
+// TestDefaultStallMatcherIgnoresModelGeneratedQuote proves a model reply
+// that merely quotes the stop phrase, carrying metadata.inference, cannot
+// false-positive as a real stall.
+func TestDefaultStallMatcherIgnoresModelGeneratedQuote(t *testing.T) {
+	inc := Incremental{StallMatcher: DefaultStallMatcher}
+	line := `{"type":"message","message":{"id":"msg_model_quote","role":"assistant",` +
+		`"metadata":{"inference":{"provider":"anthropic","requestedModel":"claude-sonnet-5"}},` +
+		`"content":[{"type":"text","text":"I've reached the maximum number of actions I can do without user input"}]}}` + "\n"
+	if _, err := inc.Write([]byte(line)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	inc.Flush()
+	if inc.Snapshot().StalledMaxTurns {
+		t.Fatal("StalledMaxTurns = true, want false for a model-generated quote of the stop phrase")
 	}
 }
 

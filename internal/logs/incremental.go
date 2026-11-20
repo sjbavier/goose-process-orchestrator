@@ -50,20 +50,23 @@ type Incremental struct {
 	// Now stamps LastEventAt. Nil means time.Now.
 	Now func() time.Time
 	// StallMatcher reports whether the final assistant text is Goose's
-	// max-turns stop message. Nil (the default) never matches: no confirmed
-	// real sample of that message exists in this repository, so nothing is
-	// matched on a guess.
-	StallMatcher func(finalAssistantText string) bool
+	// max-turns stop message. modelGenerated is true when any fragment of
+	// that text carried metadata.inference, so a model reply that merely
+	// quotes the phrase can be told apart from Goose's own injected message.
+	// Nil (the default) never matches: no confirmed real sample of that
+	// message exists in this repository, so nothing is matched on a guess.
+	StallMatcher func(finalAssistantText string, modelGenerated bool) bool
 
-	mu       sync.Mutex
-	buf      []byte
-	dropping bool
-	snap     Snapshot
-	seenIDs  map[string]struct{}
-	haveLast bool
-	lastID   string
-	text     []byte
-	toolIDs  map[string]struct{}
+	mu            sync.Mutex
+	buf           []byte
+	dropping      bool
+	snap          Snapshot
+	seenIDs       map[string]struct{}
+	haveLast      bool
+	lastID        string
+	text          []byte
+	textInference bool
+	toolIDs       map[string]struct{}
 }
 
 // Write consumes any chunk of output, line-aligned or not. It always reports
@@ -100,7 +103,7 @@ func (i *Incremental) Flush() {
 func (i *Incremental) Snapshot() Snapshot {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.StallMatcher != nil && !i.snap.StalledMaxTurns && i.haveLast && i.StallMatcher(string(i.text)) {
+	if i.StallMatcher != nil && !i.snap.StalledMaxTurns && i.haveLast && i.StallMatcher(string(i.text), i.textInference) {
 		i.snap.StalledMaxTurns = true
 	}
 	out := i.snap
@@ -136,7 +139,7 @@ func (i *Incremental) stamp() {
 	if i.Now != nil {
 		now = i.Now
 	}
-	i.snap.LastEventAt = now()
+	i.snap.LastEventAt = now().UTC()
 }
 
 func (i *Incremental) handleLine(line []byte) {
@@ -207,9 +210,14 @@ func (i *Incremental) applyAssistantText(msg messageEvent) {
 		i.seenIDs[id] = struct{}{}
 		i.haveLast, i.lastID = true, id
 		i.text = i.text[:0]
+		i.textInference = false
 	}
 	if id != i.lastID {
 		return
+	}
+	inference := msg.Message.Metadata.Inference
+	if inference.Provider != "" || inference.RequestedModel != "" {
+		i.textInference = true
 	}
 	for _, c := range msg.Message.Content {
 		if c.Type != "text" {

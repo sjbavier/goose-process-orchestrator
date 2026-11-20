@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,6 +218,13 @@ func pollField(t *testing.T, ctx context.Context, session *mcp.ClientSession, id
 // guarantee the other forwarded flags have, checked here against an actual
 // running process instead of only args()' return value.
 func TestOutputLimitForwardedToAutoStartedOrchestrator(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// CR-020: orchestratorArgvFor reads /proc/<pid>/cmdline, which has no
+		// verified darwin equivalent in this repo (see
+		// internal/supervisor/procstat_darwin.go's own fail-closed stub for
+		// the same class of problem) — skip cleanly rather than guess.
+		t.Skipf("orchestratorArgvFor depends on /proc, not available on %s", runtime.GOOS)
+	}
 	f := newShimFixture(t)
 	ctx := context.Background()
 	ls := launchShimWith(t, ctx, f, "--output-limit", "4096")

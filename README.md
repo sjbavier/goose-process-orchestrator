@@ -479,7 +479,7 @@ owns the tasks. A normal operator flow is:
    | `completed` | the stream's own `complete` event was seen — the only value that affirmatively confirms a finished run |
    | `process_failed` | the process ran and exited non-zero; see `exit_code` and `stderr_tail` |
    | `no_complete_event` | the task reached a terminal status but no `complete` event was ever observed, so success cannot be confirmed |
-   | `stalled_max_turns` | the run stopped by hitting its turn limit — **never returned by this build; see the limitation below** |
+   | `stalled_max_turns` | the run stopped by hitting its turn limit, detected from Goose's own stop message — see the note below |
    | absent | a non-terminal or cancelled task (cancellation is already fully explained by `status` + `cancel_requested`) |
 
    A task that this server never saw run live — one re-adopted after an
@@ -488,13 +488,14 @@ owns the tasks. A normal operator flow is:
    the server reports `completed` only when it observed the evidence for it,
    and never guesses it from a `succeeded` status alone.
 
-   **Limitation:** `stalled_max_turns` is not currently reachable. Detecting
-   a max-turns stall requires matching Goose's own stop message, and no
-   confirmed sample of that text has been captured, so the matcher ships
-   disabled rather than guessing at wording that might change between Goose
-   versions. A run that stalls on its turn limit and exits 0 is therefore
-   reported as `no_complete_event` — accurate, but less specific than it
-   could be. It is never reported as `completed`.
+   **Note:** `stalled_max_turns` is detected by matching Goose's own
+   max-turns stop message (confirmed present in goose 1.43.0, 1.52.0
+   Desktop, and 1.53.0) against the final assistant text, requiring that the
+   text not have arrived with `metadata.inference` — so a model reply that
+   merely quotes the same phrase cannot false-positive. Because Goose emits
+   its own `complete` event after that stop message, this check is
+   evaluated ahead of `completed` in the outcome priority order, so a real
+   stall is never misreported as `completed`.
 
    **Warning:** `final_text` and `stderr_tail` are unfiltered model/process
    output, exactly like `logs` and `progress` — they can contain anything the

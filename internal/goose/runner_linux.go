@@ -62,7 +62,7 @@ func (r Runner) Start(request Request, taskID string) (*supervisor.Process, arti
 		out.Close()
 		return nil, run, nil, err
 	}
-	parser := &logs.Incremental{}
+	parser := &logs.Incremental{StallMatcher: logs.DefaultStallMatcher}
 	live := &Live{parser: parser, stdout: out}
 	p, err := supervisor.Start(launch.Binary, launch.Args, launch.Dir, launch.Env, io.MultiWriter(out, parser), errout)
 	if err != nil {

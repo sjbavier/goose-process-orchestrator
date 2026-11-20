@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,6 +25,7 @@ import (
 	"github.com/local/goose-process-orchestrator/internal/scheduler"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -89,6 +89,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--mailbox-socket cannot be empty when --mailbox-extension-binary is set")
 			os.Exit(1)
 		}
+		if err := validateSocketPathLength(*mailboxSocket); err != nil {
+			fmt.Fprintf(os.Stderr, "--mailbox-socket %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if *workdir != "" {
 		// Fail closed before any task is ever accepted, same as the
@@ -134,6 +138,10 @@ func main() {
 	if *listen != "" {
 		if *recipeRoot == "" {
 			fmt.Fprintln(os.Stderr, "--recipe-root is required with --listen: every spawned recipe must resolve under an explicit allowlisted directory")
+			os.Exit(1)
+		}
+		if err := validateSocketPathLength(*listen); err != nil {
+			fmt.Fprintf(os.Stderr, "--listen %v\n", err)
 			os.Exit(1)
 		}
 		err := runSocket(context.Background(), *listen, config)
@@ -224,7 +232,10 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 	// the driver waits out a brief lock on every connection it opens, rather
 	// than surfacing SQLITE_BUSY to the caller; internal/tasks.Store's own
 	// bounded retry remains the backstop if this is ever exceeded.
-	db, err := sql.Open("sqlite", config.dbPath+"?_busy_timeout=5000")
+	// tasks.OpenDB builds that same DSN, shared with every test's own store
+	// construction so correctness never depends on tests using a different,
+	// timeout-less DSN than production.
+	db, err := tasks.OpenDB(config.dbPath)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -402,6 +413,23 @@ func listenUnixRestricted(socketPath string) (net.Listener, error) {
 	return net.Listen("unix", socketPath)
 }
 
+// maxSocketPathBytes is the lower of the two supported platforms'
+// sockaddr_un.sun_path limits: macOS allows 104 bytes, Linux 108. Checking
+// every configured socket path against the stricter limit, even on Linux,
+// keeps the validation's behavior identical regardless of which platform
+// actually binds it (CR-019).
+const maxSocketPathBytes = 104
+
+// validateSocketPathLength rejects a socket path that would overflow
+// sockaddr_un.sun_path on either supported platform, with a clear error
+// instead of the unhelpful "bind: invalid argument" the kernel returns.
+func validateSocketPathLength(socketPath string) error {
+	if len(socketPath) > maxSocketPathBytes {
+		return fmt.Errorf("socket path is %d bytes; platform limit is %d", len(socketPath), maxSocketPathBytes)
+	}
+	return nil
+}
+
 func bindOrDial(socketPath string) (net.Listener, error) {
 	listener, err := listenUnixRestricted(socketPath)
 	if err == nil {
@@ -410,12 +438,33 @@ func bindOrDial(socketPath string) (net.Listener, error) {
 	if !errors.Is(err, syscall.EADDRINUSE) {
 		return nil, fmt.Errorf("listen on %q: %w", socketPath, err)
 	}
-	if conn, dialErr := net.DialTimeout("unix", socketPath, 500*time.Millisecond); dialErr == nil {
-		conn.Close()
+
+	// From here on, only the holder of this advisory lock may decide the
+	// socket is stale, remove it, and re-bind. This closes the race where two
+	// racers both find nothing answering and both proceed to remove+re-bind:
+	// without serialization, the second one to run could delete the first
+	// one's freshly bound, live socket out from under it.
+	unlock, lockErr := lockSocketPath(socketPath)
+	if lockErr != nil {
+		return nil, fmt.Errorf("lock %q: %w", socketPath+".lock", lockErr)
+	}
+	defer unlock()
+
+	// Re-check under the lock: whoever held it before us may have already
+	// removed the stale socket and rebound.
+	listener, err = listenUnixRestricted(socketPath)
+	if err == nil {
+		return listener, nil
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("listen on %q: %w", socketPath, err)
+	}
+	if dialAlive(socketPath) {
 		return nil, errAlreadyOwned
 	}
-	// Nothing answered: a stale socket file from a prior process that never
-	// unlinked it (out-of-scope crash case). Remove it and bind exactly once more.
+	// Nothing answered after retrying: a stale socket file from a prior
+	// process that never unlinked it (out-of-scope crash case). Remove it and
+	// bind exactly once more.
 	if rmErr := os.Remove(socketPath); rmErr != nil && !os.IsNotExist(rmErr) {
 		return nil, fmt.Errorf("remove stale socket %q: %w", socketPath, rmErr)
 	}
@@ -424,6 +473,45 @@ func bindOrDial(socketPath string) (net.Listener, error) {
 		return nil, fmt.Errorf("listen on %q after removing stale socket: %w", socketPath, err)
 	}
 	return listener, nil
+}
+
+// dialAlive retries the liveness dial a bounded number of times with a short
+// backoff before concluding nothing is listening, to cover the window where a
+// racer has bound the socket but not yet called Accept.
+func dialAlive(socketPath string) bool {
+	const attempts = 3
+	const backoff = 50 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		if conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond); err == nil {
+			conn.Close()
+			return true
+		}
+		if i < attempts-1 {
+			time.Sleep(backoff)
+		}
+	}
+	return false
+}
+
+// lockSocketPath serializes the stale-check/remove/re-bind sequence in
+// bindOrDial across concurrent processes via an flock-based advisory lock on
+// socketPath+".lock". The lock file is never removed: a leftover empty lock
+// file is harmless, and flock is re-acquirable on an existing file, so there
+// is no staleness problem for the lock file itself.
+func lockSocketPath(socketPath string) (unlock func(), err error) {
+	lockPath := socketPath + ".lock"
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("flock %q: %w", lockPath, err)
+	}
+	return func() {
+		unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // runSocket binds a Unix domain socket at socketPath and serves one MCP
