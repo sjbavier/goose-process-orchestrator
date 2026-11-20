@@ -4,7 +4,7 @@ A local MCP task server with SQLite-backed task records, bounded scheduling, and
 
 ## Current scope
 
-The server exposes only the typed `spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and `send_message` tools, in both transport modes. `spawn` starts an actual owned OS process via `internal/orchestrator`'s adapter against an allowlisted `goose run` recipe, and `cancel` reaches that process's owned group, not just its database row. `list` is read-only: it returns tasks newest first, with an optional `status` filter and a `limit` capped at a server-side maximum, so a client that lost a task ID (chat compaction, a new session, a different client) can rediscover it without direct SQLite access. `send_message` queues an instruction for a running task's inbox, delivered at its next checkpoint — see "Task mailbox" below.
+The server exposes only the typed `server_info`, `spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and `send_message` tools, in both transport modes. `spawn` starts an actual owned OS process via `internal/orchestrator`'s adapter against an allowlisted `goose run` recipe, and `cancel` reaches that process's owned group, not just its database row. `list` is read-only: it returns tasks newest first, with an optional `status` filter and a `limit` capped at a server-side maximum, so a client that lost a task ID (chat compaction, a new session, a different client) can rediscover it without direct SQLite access. `send_message` queues an instruction for a running task's inbox, delivered at its next checkpoint — see "Task mailbox" below.
 
 `logs` and `progress` are also read-only, and work while a task is still running, not only after it finishes: `logs` returns a bounded tail of the task's captured `stdout.raw`/`stderr.raw`, and `progress` defensively parses that same stdout stream (`goose run --output-format stream-json`) into a message-event count, the last assistant text seen, provider/model, and tokens/cost once a `complete` event has been seen. Both locate the task's run directory by its on-disk naming convention (`<runs-dir>/<task-id>-<random>/`) rather than any stored path, so no schema change was needed. See "Using tasks from an MCP client" below for the message-event-count caveat and the secret-leakage warning.
 
@@ -272,12 +272,14 @@ When enabled:
   `to` is another task's ID (or, for the controller's own tool, implicitly
   the controller); there is no direct agent-to-agent transport — every
   message still routes through the orchestrator.
-- **Delivery is checkpoint-only and at-least-once, not mid-turn.** A recipe
-  must itself call `read_inbox` at a point it chooses (a checkpoint) to see
-  what has queued since the last check; nothing pushes a message into an
-  already-running turn. Each message is marked delivered the moment
-  `read_inbox` returns it, so a message is returned at most once across
-  calls from the same task's token, oldest first.
+- **Delivery is checkpoint-only and pull-based, not mid-turn.** A recipe must
+  itself call `read_inbox` at a point it chooses (a checkpoint) to see what has
+  queued since the last check; nothing pushes a message into an already-running
+  turn. The read and delivered mark commit in one database transaction, and
+  each message is returned at most once across successful calls from the same
+  task's token, oldest first. This is not an acknowledgement/retry protocol: if
+  the agent receives a response but fails before acting on it, GPO does not
+  redeliver that message.
 - **Every task's inbox defaults to `controller_only`**: a message whose
   sender is another task's identity is rejected, before any storage, unless
   that recipient's `inbox_policy` has been set to `open`. Pass
@@ -342,6 +344,35 @@ recipe write a checkpoint file, and have a later recipe read it back via a
 parameter. This sidesteps the shared-session-store and token-replay
 tradeoffs above entirely and is the supported answer today — not a
 stopgap pending a future native-resume feature.
+
+### Guidance, checkpoints, and continuing incomplete work
+
+GPO does not resume a completed Goose process or inject a controller message
+mid-turn. The supported guidance path for a **live** task is cooperative:
+enable the mailbox extension, author the recipe to call `read_inbox` after its
+initial instructions and at bounded step boundaries, and send guidance before
+the task exits. Checking only once at startup is useful for a message queued
+immediately after `spawn`, but it is not enough for later course correction; a
+long recipe should check between major phases and before its final reporting
+step. Mailbox reads consume turns/tool calls, so checkpoints should be
+deliberate rather than inside a tight loop.
+
+A task that already reached `succeeded`, `failed`, `timed_out`, `cancelled`,
+a terminal state (`succeeded`, `failed`, `timed_out`, or `cancelled`) has no
+live Goose process that can consume a later message. `interrupted` and
+`unknown` are wake-up states rather than terminal states, but GPO likewise has
+no confirmed live process to which it can deliver guidance. To continue that work today, spawn a **new task** with the relevant
+state/guidance supplied through a recipe-declared scalar or file parameter
+(for example `resume_notes_path`), and have the recipe load that input near the
+start. Use a new idempotency key: changing parameters or file content under an
+existing key is intentionally an idempotency conflict. For predictable work,
+set an adequate per-spawn `max_turns` up front (within `max_turns_ceiling`) and
+combine it with checkpoints; neither setting creates native process/session
+resume.
+
+This is the presumed path forward instead of hidden prompt rewriting or a
+generic ad-hoc instruction runner: recipes keep an explicit, auditable input
+contract, and live guidance remains opt-in and checkpoint-driven.
 
 ### Persistent mode via `cmd/mcp-shim`
 
@@ -413,8 +444,11 @@ itself is running — it is not a crash/reboot-recovery mechanism either.
 ### Using tasks from an MCP client
 
 Whichever transport mode is in use, call only the server's typed task tools:
-`spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and
-`send_message`. `wait` accepts 1–32 unique task IDs in caller order, `mode`
+`server_info`, `spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`,
+`progress`, and `send_message`. Call `server_info` once when a client needs the
+server's actual paths, limits, cached Goose version, queue counts, retention
+settings, or build identity rather than relying on copied configuration.
+`wait` accepts 1–32 unique task IDs in caller order, `mode`
 (`all` by default or `any`), and integer `timeout_seconds` (240 by default,
 maximum 280). It wakes on terminal, `interrupted`, or `unknown` status and
 returns all requested tasks in caller order with the same enriched fields as
@@ -422,16 +456,19 @@ returns all requested tasks in caller order with the same enriched fields as
 cancelled/disconnected wait request stops only that read; it never cancels or
 owns the tasks. A normal operator flow is:
 
-1. Request `spawn` with an allowlisted recipe/workspace and, if the recipe
-   declares parameters, a `parameters` object holding them (no secrets);
-   record the returned task ID.
-2. Use `status` and `result` later, including after reconnecting a client
-   (in persistent mode, from a different connection entirely), with that task
-   ID. Both return `id`, `status`, `result`, and `cancel_requested`, plus —
+1. Request `spawn` with an allowlisted recipe and, if the recipe declares
+   inputs, a `parameters` and/or `file_parameters` object (no secrets); record
+   the returned task ID.
+2. Use `wait` with that ID (or up to 32 IDs for fan-out), then call `result`.
+   `status` remains the non-blocking snapshot when a caller does not want to
+   wait. All three can be used after reconnecting a client (in persistent
+   mode, from a different connection entirely). `status` and `result` both
+   return `id`, `status`, `result`, and `cancel_requested`, plus —
    for a task this server actually ran — `run_dir`, `final_text` (the last
    assistant message, with `final_text_truncated` when it was bounded),
    `outcome`, `exit_code`, `failure`, `created_at`/`started_at`/`ended_at`,
-   and, for a task whose process failed, a bounded `stderr_tail` (4 KiB,
+   and capture accounting (`stdout_truncated`/`bytes_dropped`), plus, for a
+   task whose process failed, a bounded `stderr_tail` (4 KiB,
    with `stderr_tail_truncated`). `result` keeps its existing meaning — the
    run-directory path, not the model's answer; read `final_text` for that.
    `outcome` is the server's own classification of how a terminal task
@@ -472,10 +509,11 @@ owns the tasks. A normal operator flow is:
    `succeeded`, `failed`, `timed_out`, `cancelled`, `interrupted`, `unknown`)
    to narrow it, and `limit` to bound how many rows come back — `limit` is
    always capped at the server-side maximum regardless of what is requested.
-   Each entry has `id`, `recipe`, `status`, `created_at`, `updated_at`, and
-   `cancel_requested`, the same fields `status` already exposes individually,
-   so the returned `id` can be used immediately with `status`, `result`, or
-   `cancel`.
+   Each entry has `id`, caller-chosen `idempotency_key`, `recipe`, `status`,
+   `created_at`, `updated_at`, and `cancel_requested`; pass literal
+   `key_prefix` to rediscover one logical workflow's tasks, optionally together
+   with `status`. The returned `id` can be used immediately with `status`,
+   `result`, `wait`, or `cancel`.
 5. While a task is `running` (or after it finishes, until its run directory
    is removed — by default nothing in this project deletes one; see
    "Run-directory retention" above for the opt-in sweep), call `logs` with
@@ -511,11 +549,13 @@ owns the tasks. A normal operator flow is:
    error wording distinguishes why: an unknown task ID, a known task that
    has not started yet, and a known task whose run directory existed but is
    no longer available (most likely swept by retention).
-8. To queue a running task a further instruction without cancelling it, call
+8. To queue a live task a further instruction without cancelling it, call
    `send_message` with that task's ID and a `body` (no secrets — see "Task
    mailbox" above). It is only picked up at the task's own next checkpoint
    (its recipe calling `read_inbox`), never mid-turn; whether a given recipe
-   checks at all is up to how it was authored.
+   checks at all is up to how it was authored. The store accepts a message for
+   any existing task row, including an already-ended task, but an ended Goose
+   process cannot read it: that message remains durable and undelivered.
 9. In stdio mode, exit the server when its owning foreground process is no
    longer needed. In persistent mode, closing one client's connection (or its
    `mcp-shim` process) does not stop the orchestrator; stop it directly if it
