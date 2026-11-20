@@ -68,6 +68,31 @@ func killOrchestratorFor(socketPath string) {
 	}
 }
 
+// orchestratorArgvFor returns the argv of whatever auto-started orchestrator
+// is serving socketPath, found the same way killOrchestratorFor finds it: by
+// its unique --listen argument in /proc, since the detached process is never
+// a child this test holds a handle to.
+func orchestratorArgvFor(socketPath string) []string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+		if containsArgPair(args, "--listen", socketPath) {
+			return args
+		}
+	}
+	return nil
+}
+
 func containsArgPair(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {
@@ -89,14 +114,21 @@ type launchedShim struct {
 // what an MCP client (Goose Desktop, Claude Code, etc.) does.
 func launchShim(t *testing.T, ctx context.Context, f shimFixture) launchedShim {
 	t.Helper()
-	cmd := exec.Command(f.shimBin,
+	return launchShimWith(t, ctx, f)
+}
+
+// launchShimWith is launchShim plus extra shim flags, for tests that need to
+// observe how a specific flag reaches the orchestrator the shim auto-starts.
+func launchShimWith(t *testing.T, ctx context.Context, f shimFixture, extra ...string) launchedShim {
+	t.Helper()
+	cmd := exec.Command(f.shimBin, append([]string{
 		"--socket", f.socketPath,
 		"--orchestrator-binary", f.orchBin,
 		"--recipe-root", f.recipeRoot,
 		"--goose-binary", f.gooseBin,
 		"--db", f.dbPath,
 		"--runs-dir", f.runsDir,
-	)
+	}, extra...)...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +209,30 @@ func pollField(t *testing.T, ctx context.Context, session *mcp.ClientSession, id
 		time.Sleep(200 * time.Millisecond)
 	}
 	return last
+}
+
+// TestOutputLimitForwardedToAutoStartedOrchestrator proves --output-limit
+// reaches the real auto-started orchestrator's argv verbatim, rather than
+// that process falling back to its own default — the same forwarding
+// guarantee the other forwarded flags have, checked here against an actual
+// running process instead of only args()' return value.
+func TestOutputLimitForwardedToAutoStartedOrchestrator(t *testing.T) {
+	f := newShimFixture(t)
+	ctx := context.Background()
+	ls := launchShimWith(t, ctx, f, "--output-limit", "4096")
+	defer closeAsClientDisconnect(t, ls)
+
+	// A completed tool call proves the orchestrator this shim started is the
+	// one serving the socket, so its argv is the argv under test.
+	callTool(t, ctx, ls.session, "list", map[string]any{})
+
+	argv := orchestratorArgvFor(f.socketPath)
+	if argv == nil {
+		t.Fatal("no orchestrator process found serving the shim's socket")
+	}
+	if !containsArgPair(argv, "--output-limit", "4096") {
+		t.Fatalf("orchestrator argv = %v, want --output-limit 4096", argv)
+	}
 }
 
 // TestAcceptance1and2_SurvivesClientDisconnectAndReconnect proves plan.md's

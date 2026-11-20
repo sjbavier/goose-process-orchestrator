@@ -43,6 +43,7 @@ func main() {
 	mailboxExtensionBinary := flag.String("mailbox-extension-binary", "", "path to the mailbox-extension binary; empty (the default) leaves the mailbox feature entirely disabled, with spawned-recipe argv/env unchanged")
 	mailboxSocket := flag.String("mailbox-socket", "mailbox.sock", "local Unix domain socket path the mailbox server listens on; only used when --mailbox-extension-binary is set")
 	workdir := flag.String("workdir", "", "override the spawned goose run child's working directory; empty (the default) uses the task's own isolated run directory under --runs-dir, unchanged from today")
+	outputLimit := flag.Int64("output-limit", artifacts.DefaultOutputLimit, "maximum bytes of a spawned recipe's stdout captured to its run directory's stdout.raw; must be positive (there is no unlimited setting). The live outcome summary is parsed from the full stream regardless of this cap")
 	flag.Parse()
 	if *mcpStdio && *listen != "" {
 		fmt.Fprintln(os.Stderr, "--mcp-stdio and --listen are mutually exclusive")
@@ -58,6 +59,12 @@ func main() {
 	}
 	if *maxTurnsCeiling < *maxTurns {
 		fmt.Fprintln(os.Stderr, "--max-turns-ceiling must be at least --max-turns")
+		os.Exit(1)
+	}
+	if *outputLimit < 1 {
+		// Fail closed rather than treating 0/negative as "unlimited": an
+		// unbounded capture would let one runaway recipe fill the disk.
+		fmt.Fprintln(os.Stderr, "--output-limit must be at least 1; there is no unlimited setting")
 		os.Exit(1)
 	}
 	if *runsMaxAge < 0 {
@@ -101,6 +108,7 @@ func main() {
 		mailboxExtensionBinary: *mailboxExtensionBinary,
 		mailboxSocket:          *mailboxSocket,
 		workdir:                *workdir,
+		outputLimit:            *outputLimit,
 	}
 	// The interval only matters once a limit is configured; requiring it to be
 	// positive unconditionally would reject an invocation that never sweeps.
@@ -175,6 +183,14 @@ type serverConfig struct {
 	// stays its own isolated run directory, exactly as before this feature
 	// existed.
 	workdir string
+	// outputLimit caps how many bytes of a spawned recipe's stdout are
+	// captured to disk. It only bounds the on-disk capture: the live outcome
+	// summary is parsed from the full stream, so raising or lowering this
+	// never changes what a task reports. Zero is not a valid flag value
+	// (main rejects it); a zero value here falls back to
+	// artifacts.DefaultOutputLimit, matching artifacts.Manager's own
+	// permissive behavior for direct library callers.
+	outputLimit int64
 }
 
 // newServer constructs the service/scheduler/store exactly once and wraps it
@@ -240,7 +256,7 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 	}
 	launcher := goose.Runner{
 		Config:    launcherConfig,
-		Artifacts: artifacts.Manager{Root: config.runsDir},
+		Artifacts: artifacts.Manager{Root: config.runsDir, Limit: config.outputLimit},
 	}
 	runner := orchestrator.New(launcher, store)
 	// Nil (the default, mailbox disabled) keeps Runner.Run's behavior exactly

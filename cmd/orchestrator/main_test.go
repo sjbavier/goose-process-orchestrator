@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/local/goose-process-orchestrator/internal/mailbox"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -54,7 +55,7 @@ func testConfig(dbPath, recipeRoot, gooseBinary, runsDir string, maxConcurrent i
 	return serverConfig{
 		dbPath: dbPath, recipeRoot: recipeRoot, gooseBinary: gooseBinary, runsDir: runsDir,
 		maxConcurrent: maxConcurrent, maxTurns: 25, maxTurnsCeiling: 200,
-		sweepInterval: 15 * time.Minute,
+		sweepInterval: 15 * time.Minute, outputLimit: artifacts.DefaultOutputLimit,
 	}
 }
 
@@ -66,6 +67,7 @@ const fakeGooseScript = `#!/bin/sh
 recipe=""
 maxturns=""
 extension=""
+allargs="$*"
 while [ $# -gt 0 ]; do
   case "$1" in
     --recipe) recipe="$2"; shift 2 ;;
@@ -78,6 +80,11 @@ name=$(basename "$recipe")
 case "$name" in
   sleep.yaml) sleep 30 & wait ;;
   echo-max-turns.yaml) echo "$maxturns" > "$(dirname "$recipe")/observed-max-turns.txt"; exit 0 ;;
+  flood.yaml)
+    echo "$allargs" > "$(dirname "$recipe")/observed-argv.txt"
+    i=0
+    while [ $i -lt 200 ]; do echo "0123456789012345678901234567890123456789"; i=$((i+1)); done
+    exit 0 ;;
   mailbox-check.yaml)
     printf '%s\n%s\n' "$extension" "$MAILBOX_TOKEN" > "$(dirname "$recipe")/observed-mailbox.txt"
     exit 0 ;;
@@ -100,7 +107,7 @@ func newFakeGoose(t *testing.T) (binary, recipeRoot string) {
 		t.Fatal(err)
 	}
 	recipeRoot = t.TempDir()
-	for _, fixture := range []string{"sleep.yaml", "echo-max-turns.yaml", "mailbox-check.yaml", "mailbox-e2e-a.yaml", "mailbox-e2e-b.yaml"} {
+	for _, fixture := range []string{"sleep.yaml", "echo-max-turns.yaml", "flood.yaml", "mailbox-check.yaml", "mailbox-e2e-a.yaml", "mailbox-e2e-b.yaml"} {
 		if err := os.WriteFile(filepath.Join(recipeRoot, fixture), []byte("title: fixture\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -702,6 +709,8 @@ func TestRetentionFlagValidationRejectsBadInput(t *testing.T) {
 		{"missing mailbox extension binary", []string{"--mailbox-extension-binary=/does/not/exist"}, "is not an accessible regular file"},
 		{"empty mailbox socket with extension binary set", []string{"--mailbox-extension-binary=" + orch, "--mailbox-socket="}, "--mailbox-socket cannot be empty"},
 		{"missing workdir", []string{"--workdir=/does/not/exist"}, "is not an accessible directory"},
+		{"zero output limit", []string{"--output-limit=0"}, "--output-limit must be at least 1"},
+		{"negative output limit", []string{"--output-limit=-5"}, "--output-limit must be at least 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(orch, tc.args...)
@@ -713,6 +722,67 @@ func TestRetentionFlagValidationRejectsBadInput(t *testing.T) {
 				t.Fatalf("output = %q, want it to contain %q", out, tc.want)
 			}
 		})
+	}
+}
+
+// TestOutputLimitCapsCaptureWithoutReachingGooseArgv proves both halves of
+// --output-limit's contract end to end through a real socket server: the
+// configured value actually reaches the artifacts.Manager that caps
+// stdout.raw (a recipe flooding ~8 KiB is kept at exactly the limit), and it
+// never leaks into the spawned `goose run`'s own argv — it is a local
+// capture bound, not something the child is told about.
+func TestOutputLimitCapsCaptureWithoutReachingGooseArgv(t *testing.T) {
+	gooseBinary, recipeRoot := newFakeGoose(t)
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "orch.sock")
+	runsDir := filepath.Join(dir, "runs")
+
+	const limit = 1024
+	config := testConfig(filepath.Join(dir, "orchestrator.db"), recipeRoot, gooseBinary, runsDir, 20)
+	config.outputLimit = limit
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runSocket(ctx, socketPath, config) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Logf("runSocket exited: %v", err)
+		}
+	})
+
+	session := dialSession(t, ctx, socketPath)
+	defer session.Close()
+
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "spawn", Arguments: map[string]any{
+		"recipe": filepath.Join(recipeRoot, "flood.yaml"), "idempotency_key": "flood",
+	}})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	id := structuredField(t, res, "id")
+	if status := pollStatus(t, ctx, session, id, "succeeded", 10*time.Second); status != "succeeded" {
+		t.Fatalf("status=%q, want succeeded", status)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(runsDir, id+"-*", "stdout.raw"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("stdout.raw for %q: matches=%v err=%v", id, matches, err)
+	}
+	captured, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != limit {
+		t.Fatalf("captured %d bytes, want exactly the configured %d-byte limit", len(captured), limit)
+	}
+
+	argv, err := os.ReadFile(filepath.Join(recipeRoot, "observed-argv.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argv), "output-limit") {
+		t.Fatalf("goose argv = %q, want no mention of output-limit", argv)
 	}
 }
 

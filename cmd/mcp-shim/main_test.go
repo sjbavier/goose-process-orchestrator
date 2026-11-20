@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -25,6 +28,7 @@ func testFlags(dbPath, recipeRoot, gooseBinary, runsDir string) orchestratorFlag
 		dbPath: dbPath, recipeRoot: recipeRoot, gooseBinary: gooseBinary, runsDir: runsDir,
 		maxConcurrent: 20, maxTurns: 25, runsSweepInterval: 15 * time.Minute,
 		mailboxSocket: "mailbox.sock", maxTurnsCeiling: 200,
+		outputLimit: artifacts.DefaultOutputLimit,
 	}
 }
 
@@ -171,6 +175,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults(t *testing
 		dbPath: "db", recipeRoot: "recipes", gooseBinary: "goose", runsDir: "runs",
 		maxConcurrent: 20, maxTurns: 25,
 		mailboxSocket: "mailbox.sock", maxTurnsCeiling: 200,
+		outputLimit: artifacts.DefaultOutputLimit,
 	}
 	args := f.args()
 	want := map[string]string{
@@ -178,6 +183,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsAtDefaults(t *testing
 		"--mailbox-socket":           "mailbox.sock",
 		"--max-turns-ceiling":        "200",
 		"--workdir":                  "",
+		"--output-limit":             strconv.FormatInt(artifacts.DefaultOutputLimit, 10),
 	}
 	for flag, value := range want {
 		found := false
@@ -206,6 +212,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit(t *testing.T
 		mailboxSocket:          "custom-mailbox.sock",
 		maxTurnsCeiling:        500,
 		workdir:                "/home/you/project",
+		outputLimit:            4096,
 	}
 	args := f.args()
 	want := map[string]string{
@@ -213,6 +220,7 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit(t *testing.T
 		"--mailbox-socket":           "custom-mailbox.sock",
 		"--max-turns-ceiling":        "500",
 		"--workdir":                  "/home/you/project",
+		"--output-limit":             "4096",
 	}
 	for flag, value := range want {
 		found := false
@@ -227,6 +235,32 @@ func TestOrchestratorFlagsArgsCarriesMailboxAndCeilingFlagsExplicit(t *testing.T
 		if !found {
 			t.Fatalf("args() = %v, missing %s", args, flag)
 		}
+	}
+}
+
+// TestOutputLimitValidationRejectsNonPositive proves the shim refuses a
+// non-positive --output-limit itself rather than forwarding it and leaving
+// the operator with an opaque dial failure once the auto-started
+// orchestrator (which rejects it too) exits immediately.
+func TestOutputLimitValidationRejectsNonPositive(t *testing.T) {
+	shim := shimBinary(t)
+	_, recipeRoot := newFakeGoose(t)
+	for _, value := range []string{"0", "-5"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := exec.Command(shim,
+				"--socket", filepath.Join(t.TempDir(), "orch.sock"),
+				"--orchestrator-binary", orchestratorBinary(t),
+				"--recipe-root", recipeRoot,
+				"--output-limit", value,
+			)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected a non-zero exit, got none; output: %s", out)
+			}
+			if want := "--output-limit must be at least 1"; !strings.Contains(string(out), want) {
+				t.Fatalf("output = %q, want it to contain %q", out, want)
+			}
+		})
 	}
 }
 

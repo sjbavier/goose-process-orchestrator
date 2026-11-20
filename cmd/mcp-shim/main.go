@@ -16,6 +16,11 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	// Only for DefaultOutputLimit: the shim's default must be the same number
+	// the orchestrator would have used, and sharing the constant is the only
+	// way that cannot drift silently.
+	"github.com/local/goose-process-orchestrator/internal/artifacts"
 )
 
 func main() {
@@ -34,6 +39,7 @@ func main() {
 	mailboxSocket := flag.String("mailbox-socket", "mailbox.sock", "local Unix domain socket path the mailbox server listens on, forwarded to an auto-started orchestrator")
 	maxTurnsCeiling := flag.Int("max-turns-ceiling", 200, "hard cap on a spawn's max_turns input, forwarded to an auto-started orchestrator")
 	workdir := flag.String("workdir", "", "override the spawned goose run child's working directory, forwarded to an auto-started orchestrator; empty (the default) leaves it at the task's own isolated run directory")
+	outputLimit := flag.Int64("output-limit", artifacts.DefaultOutputLimit, "maximum bytes of a spawned recipe's stdout captured to disk, forwarded to an auto-started orchestrator; must be positive")
 	flag.Parse()
 
 	if *socket == "" {
@@ -46,6 +52,13 @@ func main() {
 	}
 	if *recipeRoot == "" {
 		fmt.Fprintln(os.Stderr, "--recipe-root is required")
+		os.Exit(1)
+	}
+	// The orchestrator rejects this too; checking here as well turns what
+	// would otherwise surface as an opaque dial timeout (the auto-started
+	// orchestrator exiting immediately) into the actual reason.
+	if *outputLimit < 1 {
+		fmt.Fprintln(os.Stderr, "--output-limit must be at least 1; there is no unlimited setting")
 		os.Exit(1)
 	}
 
@@ -63,6 +76,7 @@ func main() {
 		mailboxSocket:          *mailboxSocket,
 		maxTurnsCeiling:        *maxTurnsCeiling,
 		workdir:                *workdir,
+		outputLimit:            *outputLimit,
 	}
 	if err := run(*socket, *orchestratorBinary, forwarded); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -81,6 +95,7 @@ type orchestratorFlags struct {
 	mailboxExtensionBinary, mailboxSocket    string
 	maxTurnsCeiling                          int
 	workdir                                  string
+	outputLimit                              int64
 }
 
 func run(socket, orchestratorBinary string, forwarded orchestratorFlags) error {
@@ -161,6 +176,7 @@ func (f orchestratorFlags) args() []string {
 		"--mailbox-socket", f.mailboxSocket,
 		"--max-turns-ceiling", strconv.Itoa(f.maxTurnsCeiling),
 		"--workdir", f.workdir,
+		"--output-limit", strconv.FormatInt(f.outputLimit, 10),
 	}
 }
 
