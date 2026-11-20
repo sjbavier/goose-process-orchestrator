@@ -18,6 +18,7 @@ type Service interface {
 	Logs(ctx context.Context, id, stream string, maxBytes int) (scheduler.LogsResult, error)
 	Progress(ctx context.Context, id string) (scheduler.ProgressResult, error)
 	Outcome(ctx context.Context, id string) (scheduler.OutcomeResult, error)
+	Wait(ctx context.Context, ids []string, mode string, timeout time.Duration) (scheduler.WaitResult, error)
 	SendMessage(ctx context.Context, id, body, kind string) (tasks.Message, error)
 	ServerInfo(context.Context) (scheduler.ServerInfo, error)
 }
@@ -64,6 +65,17 @@ type ServerInfoOutput struct {
 
 type IDInput struct {
 	ID string `json:"id"`
+}
+
+type WaitInput struct {
+	IDs            []string `json:"ids"`
+	Mode           string   `json:"mode,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+}
+
+type WaitOutput struct {
+	Tasks    []TaskOutput `json:"tasks"`
+	TimedOut bool         `json:"timed_out"`
 }
 
 // TaskOutput deliberately omits the task's recipe parameters. Responses are
@@ -282,6 +294,20 @@ func New(service Service) (*mcp.Server, error) {
 			return nil, TaskOutput{}, fmt.Errorf("result: %w", e)
 		}
 		return nil, outcomeOutput(r), nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "wait", Description: "Wait for one or more tasks without client polling. mode defaults to all; all/any wake on terminal, interrupted, or unknown status. timeout_seconds defaults to 240 and is capped at 280. Returns every task in caller order with the same enriched fields as status/result plus timed_out."}, func(ctx context.Context, _ *mcp.CallToolRequest, in WaitInput) (*mcp.CallToolResult, WaitOutput, error) {
+		if in.TimeoutSeconds < 0 || in.TimeoutSeconds > int(scheduler.MaxWaitTimeout/time.Second) {
+			return nil, WaitOutput{}, fmt.Errorf("wait: %w: timeout_seconds must be between 0 and %d", scheduler.ErrInvalidWait, int(scheduler.MaxWaitTimeout/time.Second))
+		}
+		r, e := service.Wait(ctx, in.IDs, in.Mode, time.Duration(in.TimeoutSeconds)*time.Second)
+		if e != nil {
+			return nil, WaitOutput{}, fmt.Errorf("wait: %w", e)
+		}
+		out := make([]TaskOutput, len(r.Tasks))
+		for i := range r.Tasks {
+			out[i] = outcomeOutput(r.Tasks[i])
+		}
+		return nil, WaitOutput{Tasks: out, TimedOut: r.TimedOut}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "cancel", Description: "Request task cancellation"}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
 		t, e := service.Cancel(ctx, in.ID)

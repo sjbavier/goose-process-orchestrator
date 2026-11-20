@@ -1,6 +1,6 @@
 # Setting up as a Goose extension
 
-This walks through adding `goose-process-orchestrator` as a Goose extension — either by hand or by having Goose itself follow these steps — so `spawn`/`status`/`result`/`cancel`/`list`/`logs`/`progress`/`send_message` become tools available in a normal Goose session, backed by background recipe runs that survive you closing the window.
+This walks through adding `goose-process-orchestrator` as a Goose extension — either by hand or by having Goose itself follow these steps — so `spawn`/`status`/`result`/`wait`/`cancel`/`list`/`logs`/`progress`/`send_message` become tools available in a normal Goose session, backed by background recipe runs that survive you closing the window.
 
 Use **persistent mode** (`cmd/mcp-shim`, this doc's default) unless you have a specific reason not to: it is what makes a spawned task keep running, and stay checkable/cancelable, after the client that started it disconnects. See the root [`README.md`](../README.md) for the full behavioral description and what it does *not* cover (orchestrator-process crash/reboot survival is still out of scope).
 
@@ -91,7 +91,7 @@ This env var is scoped to the orchestrator daemon process and propagates to ever
 
 ## 5. Restart to pick it up
 
-Restart Goose Desktop, or start a fresh `goose session`/`goose run` — extensions are read at startup. You should now see eight new tools available: `spawn` ("Queue an approved recipe"), `status`, `result`, `cancel`, `list` (rediscover a lost task ID), `logs` (bounded tail of a task's captured stdout/stderr, while it's still running or after), `progress` (parsed message-event count, last assistant text, provider/model, tokens/cost — see the root README for the message-event-count caveat and the secret-leakage warning), and `send_message` (queue a running task an instruction, delivered at its next checkpoint — see "Task mailbox" in the root README, and step 6 below if you also want spawned agents themselves to read/send mailbox messages).
+Restart Goose Desktop, or start a fresh `goose session`/`goose run` — extensions are read at startup. You should now see ten new tools available: `server_info`, `spawn` ("Queue an approved recipe"), `status`, `result`, `wait` (bounded server-side waiting; default 240 seconds, maximum 280, safely below this config's 300-second extension timeout), `cancel`, `list` (rediscover a lost task ID), `logs` (bounded tail of a task's captured stdout/stderr, while it's still running or after), `progress` (parsed message-event count, last assistant text, provider/model, tokens/cost — see the root README for the message-event-count caveat and the secret-leakage warning), and `send_message` (queue a running task an instruction, delivered at its next checkpoint — see "Task mailbox" in the root README, and step 6 below if you also want spawned agents themselves to read/send mailbox messages).
 
 ## 6. Optional: let spawned agents read and send mailbox messages
 
@@ -121,7 +121,7 @@ Once enabled, a spawned recipe that calls `read_inbox` at a checkpoint sees anyt
 Ask Goose (or call the tools directly if you're scripting this) to:
 
 1. `spawn` a trivial, already-allowlisted recipe; note the returned task `id`.
-2. `status` with that `id` — confirm it's not an error and progresses toward a terminal state.
+2. `wait` with `ids: [id]` — confirm it returns when the task reaches a terminal, `interrupted`, or `unknown` state (or with `timed_out: true`). A cancelled client call stops only the wait, never the task.
 3. `result` with that `id` once it finishes. Check `outcome` is `completed` and read the model's own answer from `final_text` — `result`'s `result` field is the run-directory path, not the answer. An `outcome` of `no_complete_event` on a task this orchestrator ran start to finish is worth investigating; see the `outcome` table in the root README.
 4. For persistent mode specifically: close the Goose window/session entirely, then start a brand new one and `status` the same `id` again — it should show the real state, not be lost. That's the capability this whole setup exists for.
 

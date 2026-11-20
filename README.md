@@ -4,7 +4,7 @@ A local MCP task server with SQLite-backed task records, bounded scheduling, and
 
 ## Current scope
 
-The server exposes only the typed `spawn`, `status`, `result`, `cancel`, `list`, `logs`, `progress`, and `send_message` tools, in both transport modes. `spawn` starts an actual owned OS process via `internal/orchestrator`'s adapter against an allowlisted `goose run` recipe, and `cancel` reaches that process's owned group, not just its database row. `list` is read-only: it returns tasks newest first, with an optional `status` filter and a `limit` capped at a server-side maximum, so a client that lost a task ID (chat compaction, a new session, a different client) can rediscover it without direct SQLite access. `send_message` queues an instruction for a running task's inbox, delivered at its next checkpoint — see "Task mailbox" below.
+The server exposes only the typed `spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and `send_message` tools, in both transport modes. `spawn` starts an actual owned OS process via `internal/orchestrator`'s adapter against an allowlisted `goose run` recipe, and `cancel` reaches that process's owned group, not just its database row. `list` is read-only: it returns tasks newest first, with an optional `status` filter and a `limit` capped at a server-side maximum, so a client that lost a task ID (chat compaction, a new session, a different client) can rediscover it without direct SQLite access. `send_message` queues an instruction for a running task's inbox, delivered at its next checkpoint — see "Task mailbox" below.
 
 `logs` and `progress` are also read-only, and work while a task is still running, not only after it finishes: `logs` returns a bounded tail of the task's captured `stdout.raw`/`stderr.raw`, and `progress` defensively parses that same stdout stream (`goose run --output-format stream-json`) into a message-event count, the last assistant text seen, provider/model, and tokens/cost once a `complete` event has been seen. Both locate the task's run directory by its on-disk naming convention (`<runs-dir>/<task-id>-<random>/`) rather than any stored path, so no schema change was needed. See "Using tasks from an MCP client" below for the message-event-count caveat and the secret-leakage warning.
 
@@ -413,8 +413,14 @@ itself is running — it is not a crash/reboot-recovery mechanism either.
 ### Using tasks from an MCP client
 
 Whichever transport mode is in use, call only the server's typed task tools:
-`spawn`, `status`, `result`, `cancel`, `list`, `logs`, `progress`, and
-`send_message`. A normal operator flow is:
+`spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and
+`send_message`. `wait` accepts 1–32 unique task IDs in caller order, `mode`
+(`all` by default or `any`), and integer `timeout_seconds` (240 by default,
+maximum 280). It wakes on terminal, `interrupted`, or `unknown` status and
+returns all requested tasks in caller order with the same enriched fields as
+`status`/`result` plus `timed_out`. Any missing ID fails the whole call. A
+cancelled/disconnected wait request stops only that read; it never cancels or
+owns the tasks. A normal operator flow is:
 
 1. Request `spawn` with an allowlisted recipe/workspace and, if the recipe
    declares parameters, a `parameters` object holding them (no secrets);

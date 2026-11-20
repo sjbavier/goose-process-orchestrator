@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/local/goose-process-orchestrator/internal/logs"
 	"github.com/local/goose-process-orchestrator/internal/scheduler"
@@ -31,6 +32,13 @@ func (f *fakeService) Spawn(ctx context.Context, r scheduler.SpawnRequest) (task
 func (f *fakeService) Outcome(context.Context, string) (scheduler.OutcomeResult, error) {
 	f.task.Result = "done"
 	return scheduler.OutcomeResult{Task: f.task}, nil
+}
+func (f *fakeService) Wait(_ context.Context, ids []string, _ string, _ time.Duration) (scheduler.WaitResult, error) {
+	out := make([]scheduler.OutcomeResult, len(ids))
+	for i, id := range ids {
+		out[i] = scheduler.OutcomeResult{Task: tasks.Task{ID: id, Status: tasks.Succeeded, Result: "done"}}
+	}
+	return scheduler.WaitResult{Tasks: out}, nil
 }
 func (f *fakeService) Cancel(context.Context, string) (tasks.Task, error) { return f.task, nil }
 func (f *fakeService) List(_ context.Context, status, keyPrefix string, limit int) ([]tasks.Task, error) {
@@ -68,13 +76,13 @@ func TestOnlyApprovedToolsAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 9 {
-		t.Fatalf("tools=%d, want 9", len(list.Tools))
+	if len(list.Tools) != 10 {
+		t.Fatalf("tools=%d, want 10", len(list.Tools))
 	}
 	for _, call := range []struct {
 		name string
 		args map[string]any
-	}{{"server_info", map[string]any{}}, {"spawn", map[string]any{"recipe": "allowed.yaml", "idempotency_key": "one"}}, {"status", map[string]any{"id": "task-1"}}, {"result", map[string]any{"id": "task-1"}}, {"cancel", map[string]any{"id": "task-1"}}, {"list", map[string]any{}}, {"list", map[string]any{"status": "queued", "key_prefix": "ENG-29341:", "limit": 10}}, {"logs", map[string]any{"id": "task-1"}}, {"logs", map[string]any{"id": "task-1", "stream": "stdout", "max_bytes": 100}}, {"progress", map[string]any{"id": "task-1"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello", "kind": "note"}}} {
+	}{{"server_info", map[string]any{}}, {"spawn", map[string]any{"recipe": "allowed.yaml", "idempotency_key": "one"}}, {"status", map[string]any{"id": "task-1"}}, {"result", map[string]any{"id": "task-1"}}, {"wait", map[string]any{"ids": []string{"task-1"}}}, {"cancel", map[string]any{"id": "task-1"}}, {"list", map[string]any{}}, {"list", map[string]any{"status": "queued", "key_prefix": "ENG-29341:", "limit": 10}}, {"logs", map[string]any{"id": "task-1"}}, {"logs", map[string]any{"id": "task-1", "stream": "stdout", "max_bytes": 100}}, {"progress", map[string]any{"id": "task-1"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello"}}, {"send_message", map[string]any{"id": "task-1", "body": "hello", "kind": "note"}}} {
 		if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: call.name, Arguments: call.args}); err != nil {
 			t.Fatalf("%s: %v", call.name, err)
 		}

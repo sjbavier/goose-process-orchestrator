@@ -213,6 +213,137 @@ func (s *Service) List(ctx context.Context, status, keyPrefix string, limit int)
 	return s.store.List(ctx, filter)
 }
 
+const (
+	DefaultWaitTimeout = 240 * time.Second
+	MaxWaitTimeout     = 280 * time.Second
+	MaxWaitIDs         = 32
+	waitPollInterval   = 100 * time.Millisecond
+)
+
+var ErrInvalidWait = errors.New("invalid wait request")
+
+type WaitResult struct {
+	Tasks    []OutcomeResult
+	TimedOut bool
+}
+
+func normalizeWait(ids []string, mode string, timeout time.Duration) (string, time.Duration, error) {
+	if len(ids) == 0 || len(ids) > MaxWaitIDs {
+		return "", 0, fmt.Errorf("%w: ids must contain between 1 and %d entries", ErrInvalidWait, MaxWaitIDs)
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return "", 0, fmt.Errorf("%w: ids must not contain an empty task ID", ErrInvalidWait)
+		}
+		if _, exists := seen[id]; exists {
+			return "", 0, fmt.Errorf("%w: duplicate task ID %q", ErrInvalidWait, id)
+		}
+		seen[id] = struct{}{}
+	}
+	if mode == "" {
+		mode = "all"
+	}
+	if mode != "all" && mode != "any" {
+		return "", 0, fmt.Errorf("%w: mode must be \"all\" or \"any\"", ErrInvalidWait)
+	}
+	if timeout == 0 {
+		timeout = DefaultWaitTimeout
+	}
+	if timeout < 0 || timeout > MaxWaitTimeout {
+		return "", 0, fmt.Errorf("%w: timeout must be zero (the default) or positive and at most %s", ErrInvalidWait, MaxWaitTimeout)
+	}
+	return mode, timeout, nil
+}
+
+func waitSatisfied(ts []tasks.Task, mode string) bool {
+	matched := 0
+	for _, task := range ts {
+		if task.Status.Terminal() || task.Status == tasks.Interrupted || task.Status == tasks.Unknown {
+			matched++
+		}
+	}
+	if mode == "any" {
+		return matched > 0
+	}
+	return matched == len(ts)
+}
+
+func (s *Service) waitTasks(ctx context.Context, ids []string) ([]tasks.Task, error) {
+	result := make([]tasks.Task, len(ids))
+	for i, id := range ids {
+		task, err := s.store.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = task
+	}
+	return result, nil
+}
+
+func (s *Service) waitOutcomes(ctx context.Context, ids []string) ([]OutcomeResult, error) {
+	result := make([]OutcomeResult, len(ids))
+	for i, id := range ids {
+		outcome, err := s.Outcome(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = outcome
+	}
+	return result, nil
+}
+
+// Wait polls durable task rows until mode's wake condition is met or timeout.
+// It owns no task and starts no goroutine: request cancellation only ends this
+// read. Filesystem enrichment happens once, after polling has stopped.
+func (s *Service) Wait(ctx context.Context, ids []string, mode string, timeout time.Duration) (WaitResult, error) {
+	mode, timeout, err := normalizeWait(ids, mode, timeout)
+	if err != nil {
+		return WaitResult{}, err
+	}
+	current, err := s.waitTasks(ctx, ids)
+	if err != nil {
+		return WaitResult{}, err
+	}
+	if waitSatisfied(current, mode) {
+		outcomes, err := s.waitOutcomes(ctx, ids)
+		return WaitResult{Tasks: outcomes}, err
+	}
+
+	ticker := time.NewTicker(waitPollInterval)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return WaitResult{}, ctx.Err()
+		case <-ticker.C:
+			current, err = s.waitTasks(ctx, ids)
+			if err != nil {
+				return WaitResult{}, err
+			}
+			if waitSatisfied(current, mode) {
+				outcomes, err := s.waitOutcomes(ctx, ids)
+				return WaitResult{Tasks: outcomes}, err
+			}
+		case <-timer.C:
+			// One final enriched read gives a transition concurrent with the
+			// deadline a chance to satisfy the condition and keeps timed_out
+			// consistent with the exact task snapshots returned.
+			outcomes, err := s.waitOutcomes(ctx, ids)
+			if err != nil {
+				return WaitResult{}, err
+			}
+			current = make([]tasks.Task, len(outcomes))
+			for i := range outcomes {
+				current[i] = outcomes[i].Task
+			}
+			return WaitResult{Tasks: outcomes, TimedOut: !waitSatisfied(current, mode)}, nil
+		}
+	}
+}
+
 // LogsResult is a bounded tail of one task's captured output.
 type LogsResult struct {
 	Stdout          string
