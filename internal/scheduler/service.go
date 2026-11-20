@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/local/goose-process-orchestrator/internal/logs"
@@ -226,23 +227,122 @@ func (s *Service) Logs(ctx context.Context, id, stream string, maxBytes int) (Lo
 	return result, nil
 }
 
+// ProgressResult extends logs.ParseProgress's on-demand re-parse with the
+// fields that only the task row can supply: tool_call_count/last_event_at
+// (sourced from the live parser's periodic/final flush, chunk C5) and
+// stdout_truncated/bytes_dropped (sourced from the disk capture's own
+// accounting, chunk C2). For a running task these four reflect the most
+// recent periodic flush, not byte-exact live state — the same bounded
+// staleness logs.Progress.MessageEventCount already documents for itself.
+// They are simply zero for a task whose row predates migration 005 or was
+// reconciled after a restart (decision D): never guessed, never derived.
+type ProgressResult struct {
+	logs.Progress
+	ToolCallCount   int64
+	LastEventAt     time.Time
+	StdoutTruncated bool
+	BytesDropped    int64
+}
+
 // Progress defensively parses a task's stdout.raw stream-json output. See
 // logs.ParseProgress and logs.Progress for the exact fields and the
 // documented message_event_count caveat. Returns the same errors as Logs
 // under the same conditions.
-func (s *Service) Progress(ctx context.Context, id string) (logs.Progress, error) {
+func (s *Service) Progress(ctx context.Context, id string) (ProgressResult, error) {
 	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
 	if err != nil {
 		if errors.Is(err, artifacts.ErrRunNotFound) {
-			return logs.Progress{}, s.runUnavailableError(ctx, id)
+			return ProgressResult{}, s.runUnavailableError(ctx, id)
 		}
-		return logs.Progress{}, err
+		return ProgressResult{}, err
 	}
 	raw, err := logs.ReadBounded(run.StdoutPath, logs.MaxProgressReadBytes)
 	if err != nil {
-		return logs.Progress{}, err
+		return ProgressResult{}, err
 	}
-	return logs.ParseProgress(raw), nil
+	result := ProgressResult{Progress: logs.ParseProgress(raw)}
+	task, err := s.store.Get(ctx, id)
+	if err != nil {
+		return ProgressResult{}, err
+	}
+	if task.ToolCallCount != nil {
+		result.ToolCallCount = *task.ToolCallCount
+	}
+	if task.LastEventAt != nil {
+		result.LastEventAt = *task.LastEventAt
+	}
+	if task.StdoutTruncated != nil {
+		result.StdoutTruncated = *task.StdoutTruncated
+	}
+	if task.BytesDropped != nil {
+		result.BytesDropped = *task.BytesDropped
+	}
+	return result, nil
+}
+
+// OutcomeResult is the combined "what happened" view status/result need,
+// built from the task row plus a best-effort run-directory lookup. Outcome
+// is computed here (not stored on the row, see internal/orchestrator's
+// outcomeSummaryFromLive comment) because the correct terminal status is
+// only known once the task is actually terminal, which this method's caller
+// always has.
+type OutcomeResult struct {
+	Task tasks.Task
+	// RunDir is best-effort: empty if the run directory is gone (e.g. swept
+	// by retention) or never existed (task never started) — never an error.
+	RunDir string
+	// Outcome is one of "completed", "stalled_max_turns",
+	// "no_complete_event", "process_failed", or "" for a non-terminal or
+	// Cancelled task (cancellation already fully explains itself via
+	// status+cancel_requested).
+	Outcome             string
+	StderrTail          string
+	StderrTailTruncated bool
+}
+
+// outcomeFromTask computes OutcomeResult.Outcome per plan.md's semantics
+// table. A Succeeded task with no live summary ever recorded (CompleteSeen
+// nil, e.g. reconciled or predating migration 005) reports
+// "no_complete_event" rather than guessing "completed" — this method never
+// claims success it cannot verify.
+func outcomeFromTask(t tasks.Task) string {
+	switch t.Status {
+	case tasks.Succeeded:
+		if t.StalledMaxTurns != nil && *t.StalledMaxTurns {
+			return "stalled_max_turns"
+		}
+		if t.CompleteSeen != nil && *t.CompleteSeen {
+			return "completed"
+		}
+		return "no_complete_event"
+	case tasks.Failed, tasks.TimedOut:
+		return "process_failed"
+	default:
+		return ""
+	}
+}
+
+// Outcome assembles the status/result tool response: the task row itself,
+// its outcome classification, a best-effort run directory, and (only when
+// Outcome is "process_failed" and the run directory is still available) a
+// bounded stderr tail, reusing logs.Tail exactly as the logs tool does.
+func (s *Service) Outcome(ctx context.Context, id string) (OutcomeResult, error) {
+	task, err := s.store.Get(ctx, id)
+	if err != nil {
+		return OutcomeResult{}, err
+	}
+	result := OutcomeResult{Task: task, Outcome: outcomeFromTask(task)}
+	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
+	if err != nil {
+		return result, nil
+	}
+	result.RunDir = run.Dir
+	if result.Outcome == "process_failed" {
+		if data, truncated, terr := logs.Tail(run.StderrPath, logs.DefaultStderrTailBytes); terr == nil {
+			result.StderrTail, result.StderrTailTruncated = string(data), truncated
+		}
+	}
+	return result, nil
 }
 
 // runUnavailableError distinguishes, for a task whose run directory

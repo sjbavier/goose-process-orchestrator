@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/local/goose-process-orchestrator/internal/logs"
 	"github.com/local/goose-process-orchestrator/internal/scheduler"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,12 +13,11 @@ import (
 
 type Service interface {
 	Spawn(context.Context, scheduler.SpawnRequest) (tasks.Task, error)
-	Status(context.Context, string) (tasks.Task, error)
-	Result(context.Context, string) (tasks.Task, error)
 	Cancel(context.Context, string) (tasks.Task, error)
 	List(ctx context.Context, status string, limit int) ([]tasks.Task, error)
 	Logs(ctx context.Context, id, stream string, maxBytes int) (scheduler.LogsResult, error)
-	Progress(ctx context.Context, id string) (logs.Progress, error)
+	Progress(ctx context.Context, id string) (scheduler.ProgressResult, error)
+	Outcome(ctx context.Context, id string) (scheduler.OutcomeResult, error)
 	SendMessage(ctx context.Context, id, body, kind string) (tasks.Message, error)
 }
 type SpawnInput struct {
@@ -46,11 +44,30 @@ type IDInput struct {
 // TaskOutput deliberately omits the task's recipe parameters. Responses are
 // the widest-read surface here, and parameter values are request input that a
 // caller already holds, so echoing them only broadens exposure.
+//
+// The fields below RunDir are additive and populated only by the "status"
+// and "result" tools (via outcomeOutput); "spawn" and "cancel" keep their
+// exact previous shape (output), so these are always absent/omitted there.
 type TaskOutput struct {
 	ID              string `json:"id"`
 	Status          string `json:"status"`
 	Result          string `json:"result,omitempty"`
 	CancelRequested bool   `json:"cancel_requested"`
+
+	RunDir             string `json:"run_dir,omitempty"`
+	FinalText          string `json:"final_text,omitempty"`
+	FinalTextTruncated bool   `json:"final_text_truncated,omitempty"`
+	// Outcome is one of "completed", "stalled_max_turns",
+	// "no_complete_event", "process_failed", or absent for a non-terminal
+	// or cancelled task — see scheduler.OutcomeResult.
+	Outcome             string `json:"outcome,omitempty"`
+	ExitCode            *int   `json:"exit_code,omitempty"`
+	Failure             string `json:"failure,omitempty"`
+	CreatedAt           string `json:"created_at,omitempty"`
+	StartedAt           string `json:"started_at,omitempty"`
+	EndedAt             string `json:"ended_at,omitempty"`
+	StderrTail          string `json:"stderr_tail,omitempty"`
+	StderrTailTruncated bool   `json:"stderr_tail_truncated,omitempty"`
 }
 type ListInput struct {
 	// Status, when non-empty, filters to exactly that task status.
@@ -128,10 +145,41 @@ type ProgressOutput struct {
 	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd,omitempty"`
+	// ToolCallCount/LastEventAt/StdoutTruncated/BytesDropped come from the
+	// task row (chunks C1/C2/C5), not this on-demand re-parse; see
+	// scheduler.ProgressResult. Zero/absent for a task with no live summary
+	// ever recorded (reconciled, or predating migration 005).
+	ToolCallCount   int64  `json:"tool_call_count,omitempty"`
+	LastEventAt     string `json:"last_event_at,omitempty"`
+	StdoutTruncated bool   `json:"stdout_truncated,omitempty"`
+	BytesDropped    int64  `json:"bytes_dropped,omitempty"`
 }
 
 func output(t tasks.Task) TaskOutput {
 	return TaskOutput{ID: t.ID, Status: string(t.Status), Result: t.Result, CancelRequested: t.CancelRequestedAt != nil}
+}
+
+// outcomeOutput builds the enriched TaskOutput "status"/"result" return,
+// straight off the (possibly NULL) task row plus the outcome classification
+// and best-effort run_dir/stderr_tail scheduler.Service.Outcome already
+// resolved. Every field output(t) already sets stays byte-identical.
+func outcomeOutput(r scheduler.OutcomeResult) TaskOutput {
+	t := r.Task
+	out := output(t)
+	out.RunDir, out.Outcome = r.RunDir, r.Outcome
+	out.FinalText, out.ExitCode, out.Failure = t.FinalText, t.ExitCode, t.Failure
+	if t.FinalTextTruncated != nil {
+		out.FinalTextTruncated = *t.FinalTextTruncated
+	}
+	out.CreatedAt = t.CreatedAt.Format(time.RFC3339)
+	if t.StartedAt != nil {
+		out.StartedAt = t.StartedAt.Format(time.RFC3339)
+	}
+	if t.EndedAt != nil {
+		out.EndedAt = t.EndedAt.Format(time.RFC3339)
+	}
+	out.StderrTail, out.StderrTailTruncated = r.StderrTail, r.StderrTailTruncated
+	return out
 }
 func listItem(t tasks.Task) TaskListItem {
 	return TaskListItem{
@@ -146,8 +194,8 @@ func listItem(t tasks.Task) TaskListItem {
 func logsOutput(r scheduler.LogsResult) LogsOutput {
 	return LogsOutput{Stdout: r.Stdout, StdoutTruncated: r.StdoutTruncated, Stderr: r.Stderr, StderrTruncated: r.StderrTruncated}
 }
-func progressOutput(p logs.Progress) ProgressOutput {
-	return ProgressOutput{
+func progressOutput(p scheduler.ProgressResult) ProgressOutput {
+	out := ProgressOutput{
 		MessageEventCount: p.MessageEventCount,
 		LastAssistantText: p.LastAssistantText,
 		Provider:          p.Provider,
@@ -159,7 +207,14 @@ func progressOutput(p logs.Progress) ProgressOutput {
 		CacheReadTokens:   p.CacheReadTokens,
 		CacheWriteTokens:  p.CacheWriteTokens,
 		CostUSD:           p.CostUSD,
+		ToolCallCount:     p.ToolCallCount,
+		StdoutTruncated:   p.StdoutTruncated,
+		BytesDropped:      p.BytesDropped,
 	}
+	if !p.LastEventAt.IsZero() {
+		out.LastEventAt = p.LastEventAt.Format(time.RFC3339)
+	}
+	return out
 }
 func New(service Service) (*mcp.Server, error) {
 	if service == nil {
@@ -175,19 +230,19 @@ func New(service Service) (*mcp.Server, error) {
 		}
 		return nil, output(t), nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "status", Description: "Read task status"}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
-		t, e := service.Status(ctx, in.ID)
+	mcp.AddTool(s, &mcp.Tool{Name: "status", Description: "Read task status, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail appears only when outcome is \"process_failed\" and the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
+		r, e := service.Outcome(ctx, in.ID)
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("status: %w", e)
 		}
-		return nil, output(t), nil
+		return nil, outcomeOutput(r), nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "result", Description: "Read task result"}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
-		t, e := service.Result(ctx, in.ID)
+	mcp.AddTool(s, &mcp.Tool{Name: "result", Description: "Read task result, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail appears only when outcome is \"process_failed\" and the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
+		r, e := service.Outcome(ctx, in.ID)
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("result: %w", e)
 		}
-		return nil, output(t), nil
+		return nil, outcomeOutput(r), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "cancel", Description: "Request task cancellation"}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
 		t, e := service.Cancel(ctx, in.ID)

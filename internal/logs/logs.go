@@ -34,6 +34,11 @@ const MaxProgressReadBytes int64 = 1024 * 1024
 // Progress ever carries.
 const MaxAssistantTextBytes = 4000
 
+// DefaultStderrTailBytes bounds the stderr tail a "process_failed" outcome
+// carries: generous enough to show a real failure, small enough not to
+// duplicate what the dedicated logs tool is for.
+const DefaultStderrTailBytes int64 = 4 * 1024
+
 // Tail returns up to maxBytes from the end of the file at path, and
 // whether bytes before the returned slice were dropped. A missing file
 // returns empty data and no error: stdout.raw/stderr.raw may not exist yet

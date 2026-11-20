@@ -217,3 +217,56 @@ func TestLogsAndProgressReadRealCapturedRunDirectory(t *testing.T) {
 		t.Fatal("logs(never-spawned) did not report a tool error")
 	}
 }
+
+// TestStatusAndResultShowOutcomeSummaryFields is a real round-trip
+// status/result call, through the full MCP stack, against a task produced
+// by the full fake-goose pipeline shape (a real store-backed task, driven
+// to Succeeded with a recorded outcome summary) — proving the new JSON
+// fields appear with correct omitempty behavior, not just at the Go struct
+// level TestOutcomeOutput* already covers.
+func TestStatusAndResultShowOutcomeSummaryFields(t *testing.T) {
+	server, store, runner, _ := newAcceptanceServer(t)
+	client := connect(t, server)
+
+	call(t, client, "spawn", map[string]any{"recipe": "allowed.yaml", "idempotency_key": "outcome-case"})
+	id := "acceptance-task-1"
+	ctx := context.Background()
+	// Wait for the dispatcher's worker to actually claim the task
+	// (Queued->Starting) before driving it further; spawn itself only
+	// enqueues and returns.
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("spawn did not reach the owned worker")
+	}
+	if _, err := store.Transition(ctx, id, tasks.Running, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	if _, err := store.Transition(ctx, id, tasks.Succeeded, "run-dir-path", &exit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordOutcomeSummary(ctx, id, tasks.OutcomeSummary{FinalText: "done talking", CompleteSeen: true, TotalTokens: 12}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tool := range []string{"status", "result"} {
+		res, err := client.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"id": id}})
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		out, ok := res.StructuredContent.(map[string]any)
+		if !ok {
+			t.Fatalf("%s structured content = %#v", tool, res.StructuredContent)
+		}
+		if out["outcome"] != "completed" || out["final_text"] != "done talking" {
+			t.Fatalf("%s = %#v, want outcome=completed final_text=\"done talking\"", tool, out)
+		}
+		if out["result"] != "run-dir-path" {
+			t.Fatalf("%s result field changed meaning: %#v", tool, out)
+		}
+		if _, present := out["stderr_tail"]; present {
+			t.Fatalf("%s: stderr_tail present for a non-process_failed outcome: %#v", tool, out)
+		}
+	}
+}

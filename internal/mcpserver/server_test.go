@@ -23,10 +23,9 @@ func (f *fakeService) Spawn(ctx context.Context, r scheduler.SpawnRequest) (task
 	f.task = tasks.Task{ID: "task-1", Status: tasks.Queued, Recipe: r.Recipe, InboxPolicy: tasks.InboxPolicy(r.InboxPolicy)}
 	return f.task, nil
 }
-func (f *fakeService) Status(context.Context, string) (tasks.Task, error) { return f.task, nil }
-func (f *fakeService) Result(context.Context, string) (tasks.Task, error) {
+func (f *fakeService) Outcome(context.Context, string) (scheduler.OutcomeResult, error) {
 	f.task.Result = "done"
-	return f.task, nil
+	return scheduler.OutcomeResult{Task: f.task}, nil
 }
 func (f *fakeService) Cancel(context.Context, string) (tasks.Task, error) { return f.task, nil }
 func (f *fakeService) List(context.Context, string, int) ([]tasks.Task, error) {
@@ -35,8 +34,8 @@ func (f *fakeService) List(context.Context, string, int) ([]tasks.Task, error) {
 func (f *fakeService) Logs(context.Context, string, string, int) (scheduler.LogsResult, error) {
 	return scheduler.LogsResult{Stdout: "fake stdout", Stderr: "fake stderr"}, nil
 }
-func (f *fakeService) Progress(context.Context, string) (logs.Progress, error) {
-	return logs.Progress{MessageEventCount: 1, LastAssistantText: "fake progress"}, nil
+func (f *fakeService) Progress(context.Context, string) (scheduler.ProgressResult, error) {
+	return scheduler.ProgressResult{Progress: logs.Progress{MessageEventCount: 1, LastAssistantText: "fake progress"}}, nil
 }
 func (f *fakeService) SendMessage(_ context.Context, id, body, kind string) (tasks.Message, error) {
 	f.sentMessage = &tasks.Message{ID: 1, TaskID: id, Sender: tasks.ControllerSender, Kind: kind, Body: body}
