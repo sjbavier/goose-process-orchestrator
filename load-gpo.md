@@ -1,78 +1,96 @@
-Upgrade and verify the "Goose Process Orchestrator" extension after a code update.
+# Upgrade and verify Goose Process Orchestrator
 
-Context: the extension's binaries at ~/.local/bin/goose-orchestrator and
-~/.local/bin/goose-mcp-shim may be stale relative to the repo's main branch.
-Before rebuilding, check what's actually new since these binaries were last
-built (`git log --oneline <old-build-commit>..main` in the repo, if you know
-it) so step 4 below can be adjusted for whatever that upgrade actually adds —
-this file's own checklist reflects the project as of the per-task mailbox,
-`inbox_policy`, and `--workdir` features; if main has moved further, treat
-that checklist as a floor, not a ceiling. The extension's config entry in
-`goose info`'s reported Config yaml already points at the right paths;
-nothing there needs to change. The source is at
-~/Projects/goose-process-orchestrator on main.
+Upgrade the locally configured **Goose Process Orchestrator** extension from the
+current clean `main` branch without assuming fixed install, config, state, recipe,
+or database paths.
 
-1. Rebuild the binaries from that repo:
-     cd ~/Projects/goose-process-orchestrator
-     go build -o ~/.local/bin/goose-orchestrator ./cmd/orchestrator
-     go build -o ~/.local/bin/goose-mcp-shim ./cmd/mcp-shim
-     go build -o ~/.local/bin/goose-mailbox-extension ./cmd/mailbox-extension
-   The mailbox-extension binary is only used if the optional mailbox is
-   enabled (see the note at the end); building it is harmless otherwise.
+## Guardrails
 
-2. A live goose-orchestrator process is likely already running the old
-   binary (check with `pgrep -fa goose-orchestrator`). Stop it so the next
-   shim connection starts a fresh one from the rebuilt binary:
-     pkill -f '/goose-orchestrator --listen'
-   Confirm it's gone, then leave it stopped — the shim auto-starts it on
-   first use.
+- Read `README.md` and `docs/goose-extension-setup.md` first.
+- Discover the active config path with `goose info`. Treat the existing
+  extension entry's `cmd`, `args`, `envs`, and `timeout` as authoritative.
+- Do not edit the extension config unless explicitly asked. Do not enable the
+  optional mailbox or set a workdir merely because the build supports them.
+- Do not touch `.goose/workflows/`.
+- Do not run a billed recipe/provider smoke test without separate approval.
+- Before stopping the daemon, verify there are no `queued`, `starting`, or
+  `running` tasks. Stop and report any rather than interrupting them.
 
-3. Tell me to restart/reload so the extension's stdio child restarts too
-   (or just start a brand new goose session — extensions load at startup).
+## 1. Establish the upgrade delta
 
-4. Verify the upgrade actually took:
-   - Call `status` or `list` on an existing task ID from before the
-     upgrade (if any) and confirm the task history still reads correctly
-     — the new build applies forward-only DB migrations in place (the
-     newest adds the `task_messages` table and a `tasks.inbox_policy`
-     column) and must not lose or corrupt existing rows in
-     ~/.local/state/goose-orchestrator/orchestrator.db.
-   - Confirm the extension now exposes eight tools: `spawn`, `status`,
-     `result`, `cancel`, `list`, `logs`, `progress`, and `send_message`.
-   - `spawn` one of the allowlisted recipes under
-     ~/.local/state/goose-orchestrator/recipes (repo-tour.yaml or
-     smoke-test.yaml) with no parameters, exactly as before — confirm it
-     still queues and completes normally (this must be byte-for-byte
-     unchanged behavior; the mailbox is off by default).
-   - If either recipe declares a `parameters:` block, also try `spawn`
-     with a matching `parameters` object and confirm it's accepted; try
-     one deliberately invalid value (wrong/undeclared key) and confirm
-     `spawn` rejects it with a clear error instead of queuing anything.
-   - Call `send_message` with a real task ID and a short, non-secret
-     `body`; confirm it returns a message id. With the mailbox disabled
-     (the default) the message is simply stored for that task; no agent
-     reads it unless the mailbox is enabled and the recipe calls
-     `read_inbox`. Also confirm `send_message` on an unknown task ID
-     returns a clear error.
-   - `spawn` once with `inbox_policy: "open"` and confirm it's accepted;
-     `spawn` once with an invalid value (e.g. `"bogus"`) and confirm it's
-     rejected with a clear error and queues nothing. Omitting it entirely
-     should behave exactly as before (default `controller_only`).
-   - Report back what each call returned.
+1. Require a clean `main` checkout.
+2. Inspect the installed orchestrator with `go version -m <binary>`. If its
+   `vcs.revision` exists locally, review
+   `git log --oneline <revision>..HEAD`. If unavailable or marked dirty,
+   report that and use current source/docs as the contract rather than guessing.
+3. Read MCP registrations in `internal/mcpserver/server.go` and flags in both
+   command binaries. Current source—not a frozen checklist—is authoritative.
 
-Do not add, remove, or edit the extension's config entry — only rebuild
-the binaries and restart the running processes. Don't touch anything
-under the repo's own .goose/workflows/ directory.
+## 2. Build and install atomically
 
-Note — the mailbox is optional and NOT enabled by this upgrade. The shim does
-forward `--mailbox-extension-binary`/`--mailbox-socket` to an orchestrator it
-auto-starts, so enabling it only needs those two flags added to the shim's
-own `args` in the extension config (see docs/goose-extension-setup.md, step
-6) — it does not require starting the orchestrator by hand. Do not add them
-as part of this upgrade unless explicitly asked.
+Build all three binaries from a temporary detached worktree at `HEAD`, with outputs in a separate temporary directory:
 
-Note — `--workdir` (shim and orchestrator) is also new and optional: it
-overrides a spawned recipe's working directory, which otherwise defaults to
-the task's own isolated run directory. Leaving it unset keeps today's exact
-behavior; only add it to the extension config if a recipe actually needs to
-run from a real project checkout instead of its isolated run directory.
+```sh
+git worktree add --detach "$src_tmp" HEAD
+( cd "$src_tmp" &&
+  go build -o "$bin_tmp/goose-orchestrator" ./cmd/orchestrator &&
+  go build -o "$bin_tmp/goose-mcp-shim" ./cmd/mcp-shim &&
+  go build -o "$bin_tmp/goose-mailbox-extension" ./cmd/mailbox-extension )
+```
+
+The detached worktree keeps build identity clean even if this instruction file
+is being revised in the primary checkout. Remove it with `git worktree remove`
+afterward. Only after every build succeeds, atomically replace the binaries at
+paths implied by the configured shim/orchestrator arguments. Installing the
+mailbox binary does not enable the optional mailbox. Confirm build metadata
+identifies current clean HEAD and has `vcs.modified=false`.
+
+## 3. Restart safely
+
+Stop only the daemon that owns the configured Unix socket—never broad-match
+unrelated shims or clients. Reload the extension so its stdio child uses the new
+shim. Goose default extension changes apply to future sessions, not active ones;
+use the current session's supported reload mechanism when available, otherwise
+tell the operator to start a new session. The shim auto-starts the daemon.
+
+## 4. Verify without a provider run
+
+Using the freshly loaded extension, report exact results:
+
+1. Call `server_info`. Confirm paths/limits match config, `gpo_commit`
+   matches current HEAD when available, daemon start time is fresh, and report
+   mailbox status without changing it.
+2. Compare exposed tools to source. Current source registers `server_info`,
+   `spawn`, `status`, `result`, `wait`, `cancel`, `list`,
+   `logs`, `progress`, and `send_message`.
+3. If an existing task exists, use `list` and `status` or `result` to
+   confirm migrations preserved history. Absent live-summary fields on old or
+   re-adopted tasks are not corruption.
+4. If an already-terminal task exists, call `wait` with that one ID and a
+   short timeout; expect enriched output and `timed_out: false`.
+5. Confirm `list` exposes `idempotency_key` and accepts literal
+   `key_prefix` when an existing key permits a safe test.
+
+If no task exists, report skipped checks; do not launch billed work to compensate.
+
+## Current contracts to recognize
+
+Verify these from source/docs rather than mutating production state solely to
+demonstrate them:
+
+- Prompt-less recipes are rejected before admission.
+- Declared scalar `parameters` and bounded UTF-8 `file_parameters`
+  participate in idempotency and are omitted from responses.
+- `status`/`result` share enriched outcomes, capture accounting,
+  timestamps, final text, exit/failure data, and bounded failure stderr.
+- `wait` accepts 1–32 unique IDs, `all`/`any`, defaults to 240
+  seconds, and caps at 280 below the configured 300-second extension timeout.
+- `--output-limit` defaults to 8 MiB independently of live summaries.
+- `server_info` reports startup-cached version/config/build facts.
+- Max-turn stop-text matching remains disabled without a confirmed Goose sample;
+  uncertain successful exits are `no_complete_event`, never `completed`.
+- The optional mailbox is pull/checkpoint based, not native process/session
+  resume, and cannot revive an ended task.
+
+Finish with old/new build identities, restart status, server facts, tool set,
+history/migration evidence, skipped checks, and whether a new session is needed.
