@@ -149,6 +149,9 @@ func approvedFile(root, candidate string) (string, error) {
 	if err != nil {
 		return "", ErrUnsafeRecipe
 	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	}
 	candidate, err = filepath.Abs(candidate)
 	if err != nil {
 		return "", ErrUnsafeRecipe
