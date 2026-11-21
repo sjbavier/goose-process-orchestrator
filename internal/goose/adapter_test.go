@@ -265,7 +265,7 @@ func TestBuildResolvesRelativeRecipeRootAndRecipeToAbsolutePath(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(wd) }()
 
-	l, e := (Config{RecipeRoot: "recipes"}).Build(Request{Recipe: "recipes/safe.yaml", RunDir: run})
+	l, e := (Config{RecipeRoot: "recipes"}).Build(Request{Recipe: "safe.yaml", RunDir: run})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -311,6 +311,41 @@ func TestApprovedFileRejectsResolvedEscapes(t *testing.T) {
 		if _, err := approvedFile(root, candidate); !errors.Is(err, ErrUnsafeRecipe) {
 			t.Errorf("approvedFile(%q, %q) error = %v, want ErrUnsafeRecipe", root, candidate, err)
 		}
+	}
+}
+
+// TestApprovedFileResolvesRelativeCandidateAgainstRoot guards against a real
+// false-rejection bug: approvedFile used to resolve a relative candidate with
+// filepath.Abs alone, which resolves against this process's cwd rather than
+// root, so a legitimate relative recipe path under root was rejected (or
+// silently misresolved) whenever cwd was not root's own parent.
+func TestApprovedFileResolvesRelativeCandidateAgainstRoot(t *testing.T) {
+	root := t.TempDir()
+	recipe := filepath.Join(root, "safe.yaml")
+	if err := os.WriteFile(recipe, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantRecipe, err := filepath.EvalSymlinks(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unrelated := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+
+	got, err := approvedFile(root, "safe.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantRecipe {
+		t.Fatalf("approvedFile(%q, %q) = %q, want %q", root, "safe.yaml", got, wantRecipe)
 	}
 }
 
