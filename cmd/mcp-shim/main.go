@@ -38,6 +38,7 @@ func main() {
 	mailboxExtensionBinary := flag.String("mailbox-extension-binary", "", "path to the mailbox-extension binary, forwarded to an auto-started orchestrator; empty (the default) leaves the mailbox feature entirely disabled")
 	mailboxSocket := flag.String("mailbox-socket", "mailbox.sock", "local Unix domain socket path the mailbox server listens on, forwarded to an auto-started orchestrator")
 	maxTurnsCeiling := flag.Int("max-turns-ceiling", 200, "hard cap on a spawn's max_turns input, forwarded to an auto-started orchestrator")
+	timeoutCeiling := flag.Int("timeout-ceiling-seconds", 0, "hard cap on a spawn's timeout_seconds input, forwarded to an auto-started orchestrator; 0 (the default) means no ceiling")
 	workdir := flag.String("workdir", "", "override the spawned goose run child's working directory, forwarded to an auto-started orchestrator; empty (the default) leaves it at the task's own isolated run directory")
 	outputLimit := flag.Int64("output-limit", artifacts.DefaultOutputLimit, "maximum bytes of a spawned recipe's stdout captured to disk, forwarded to an auto-started orchestrator; must be positive")
 	flag.Parse()
@@ -75,6 +76,7 @@ func main() {
 		mailboxExtensionBinary: *mailboxExtensionBinary,
 		mailboxSocket:          *mailboxSocket,
 		maxTurnsCeiling:        *maxTurnsCeiling,
+		timeoutCeilingSeconds:  *timeoutCeiling,
 		workdir:                *workdir,
 		outputLimit:            *outputLimit,
 	}
@@ -94,6 +96,7 @@ type orchestratorFlags struct {
 	runsMaxCount                             int
 	mailboxExtensionBinary, mailboxSocket    string
 	maxTurnsCeiling                          int
+	timeoutCeilingSeconds                    int
 	workdir                                  string
 	outputLimit                              int64
 }
@@ -175,6 +178,7 @@ func (f orchestratorFlags) args() []string {
 		"--mailbox-extension-binary", f.mailboxExtensionBinary,
 		"--mailbox-socket", f.mailboxSocket,
 		"--max-turns-ceiling", strconv.Itoa(f.maxTurnsCeiling),
+		"--timeout-ceiling-seconds", strconv.Itoa(f.timeoutCeilingSeconds),
 		"--workdir", f.workdir,
 		"--output-limit", strconv.FormatInt(f.outputLimit, 10),
 	}

@@ -68,7 +68,7 @@ func (s *Store) createOnce(ctx context.Context, task Task) (createResult, error)
 		return createResult{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (id, recipe, idempotency_key, status, created_at, updated_at, max_turns, parameters, file_parameters, inbox_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, task.Recipe, task.IdempotencyKey, task.Status, task.CreatedAt, task.UpdatedAt, task.MaxTurns, parameters, fileParameters, task.InboxPolicy)
+	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (id, recipe, idempotency_key, status, created_at, updated_at, max_turns, parameters, file_parameters, inbox_policy, recipe_sha256, expect_recipe_sha256, expect_provider, expect_model, timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, task.Recipe, task.IdempotencyKey, task.Status, task.CreatedAt, task.UpdatedAt, task.MaxTurns, parameters, fileParameters, task.InboxPolicy, task.RecipeSHA256, task.ExpectRecipeSHA256, task.ExpectProvider, task.ExpectModel, task.TimeoutSeconds)
 	if err == nil {
 		return createResult{task, true}, tx.Commit()
 	}
@@ -79,7 +79,11 @@ func (s *Store) createOnce(ctx context.Context, task Task) (createResult, error)
 	// Idempotency equivalence covers the recipe, the canonical parameter
 	// encoding, and the normalized inbox policy: replaying the same key with
 	// a different policy would otherwise silently return a task whose
-	// mailbox behaves differently than the caller just requested.
+	// mailbox behaves differently than the caller just requested. It also
+	// covers the caller-supplied guards (max_turns, timeout_seconds, expect_*)
+	// so a retry that tightens a guard cannot silently get the unguarded task;
+	// omitted values are zero/empty and compare equal to each other. The
+	// observed recipe_sha256 is not caller input and stays out.
 	existingParameters, err := CanonicalParameters(existing.Parameters)
 	if err != nil {
 		return createResult{}, err
@@ -88,7 +92,9 @@ func (s *Store) createOnce(ctx context.Context, task Task) (createResult, error)
 	if err != nil {
 		return createResult{}, err
 	}
-	if existing.Recipe != task.Recipe || existingParameters != parameters || existingFileParameters != fileParameters || existing.InboxPolicy != task.InboxPolicy {
+	if existing.Recipe != task.Recipe || existingParameters != parameters || existingFileParameters != fileParameters || existing.InboxPolicy != task.InboxPolicy ||
+		existing.MaxTurns != task.MaxTurns || existing.TimeoutSeconds != task.TimeoutSeconds ||
+		existing.ExpectRecipeSHA256 != task.ExpectRecipeSHA256 || existing.ExpectProvider != task.ExpectProvider || existing.ExpectModel != task.ExpectModel {
 		return createResult{}, ErrIdempotencyConflict
 	}
 	return createResult{existing, false}, tx.Commit()
@@ -407,9 +413,74 @@ func (s *Store) recordFailureOnce(ctx context.Context, id, failure string) (Task
 	return task, tx.Commit()
 }
 
+// RecordRecipeSHA256 persists the hash of the recipe bytes actually launched.
+func (s *Store) RecordRecipeSHA256(ctx context.Context, id, sha string) (Task, error) {
+	return s.recordColumns(ctx, id, `UPDATE tasks SET recipe_sha256=? WHERE id=?`, sha)
+}
+
+// RecordEffectiveProviderModel persists the provider/model observed for a
+// task. Empty values are stored as absent, never guessed.
+func (s *Store) RecordEffectiveProviderModel(ctx context.Context, id, provider, model string) (Task, error) {
+	return s.recordColumns(ctx, id, `UPDATE tasks SET provider=?, model=? WHERE id=?`, provider, model)
+}
+
+// RecordGooseVersion persists the goose version in effect at launch.
+func (s *Store) RecordGooseVersion(ctx context.Context, id, version string) (Task, error) {
+	return s.recordColumns(ctx, id, `UPDATE tasks SET goose_version=? WHERE id=?`, version)
+}
+
+// RecordLeftovers persists the post-exit leftover scan. detection must be
+// LeftoverDetectionOK or LeftoverDetectionUnavailable; pids may be nil only
+// for "unavailable". An "ok" scan with no survivors passes an empty non-nil
+// slice so it stays distinguishable from "never scanned".
+func (s *Store) RecordLeftovers(ctx context.Context, id string, pids []int, detection string) (Task, error) {
+	if detection != LeftoverDetectionOK && detection != LeftoverDetectionUnavailable {
+		return Task{}, fmt.Errorf("invalid leftover detection %q", detection)
+	}
+	if detection == LeftoverDetectionUnavailable && len(pids) > 0 {
+		return Task{}, errors.New("unavailable leftover detection cannot report pids")
+	}
+	if detection == LeftoverDetectionOK && pids == nil {
+		pids = []int{}
+	}
+	encoded, err := encodeLeftoverPIDs(pids)
+	if err != nil {
+		return Task{}, err
+	}
+	return s.recordColumns(ctx, id, `UPDATE tasks SET leftover_pids=?, leftover_detection=? WHERE id=?`, encoded, detection)
+}
+
+// recordColumns runs one single-row UPDATE whose final placeholder is the
+// task id, then returns the reread task, with the store's busy retry.
+func (s *Store) recordColumns(ctx context.Context, id, query string, args ...any) (Task, error) {
+	args = append(args, id)
+	return withBusyRetry(ctx, func() (Task, error) {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return Task{}, err
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return Task{}, err
+		}
+		if n, err := result.RowsAffected(); err != nil {
+			return Task{}, err
+		} else if n != 1 {
+			return Task{}, ErrNotFound
+		}
+		task, err := scanTask(tx.QueryRowContext(ctx, taskByIDSQL, id))
+		if err != nil {
+			return Task{}, err
+		}
+		return task, tx.Commit()
+	})
+}
+
 const taskColumnsSQL = `SELECT id, recipe, idempotency_key, status, created_at, updated_at, started_at, ended_at, cancel_requested_at, exit_code, result, failure, max_turns, parameters, file_parameters, pid, pgid, process_start_ticks, inbox_policy,
 	final_text, final_text_truncated, outcome, complete_seen, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
-	tool_call_count, last_event_at, stalled_max_turns, stdout_truncated, bytes_dropped`
+	tool_call_count, last_event_at, stalled_max_turns, stdout_truncated, bytes_dropped,
+	recipe_sha256, provider, model, goose_version, expect_recipe_sha256, expect_provider, expect_model, timeout_seconds, leftover_pids, leftover_detection`
 const taskByIDSQL = taskColumnsSQL + ` FROM tasks WHERE id = ?`
 const taskByKeySQL = taskColumnsSQL + ` FROM tasks WHERE idempotency_key = ?`
 
@@ -435,10 +506,15 @@ func scanTaskRow(row rowScanner) (Task, error) {
 	var finalTextTruncated, completeSeen, stalledMaxTurns, stdoutTruncated sql.NullBool
 	var totalTokens, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, toolCallCount, bytesDropped sql.NullInt64
 	var costUSD sql.NullFloat64
+	var leftoverPIDs sql.NullString
 	err := row.Scan(&t.ID, &t.Recipe, &t.IdempotencyKey, &t.Status, &t.CreatedAt, &t.UpdatedAt, &started, &ended, &cancelled, &exit, &result, &failure, &t.MaxTurns, &parameters, &fileParameters, &pid, &pgid, &startTicks, &t.InboxPolicy,
 		&finalText, &finalTextTruncated, &outcome, &completeSeen, &totalTokens, &inputTokens, &outputTokens, &cacheReadTokens, &cacheWriteTokens, &costUSD,
-		&toolCallCount, &lastEventAt, &stalledMaxTurns, &stdoutTruncated, &bytesDropped)
+		&toolCallCount, &lastEventAt, &stalledMaxTurns, &stdoutTruncated, &bytesDropped,
+		&t.RecipeSHA256, &t.Provider, &t.Model, &t.GooseVersion, &t.ExpectRecipeSHA256, &t.ExpectProvider, &t.ExpectModel, &t.TimeoutSeconds, &leftoverPIDs, &t.LeftoverDetection)
 	if err != nil {
+		return Task{}, err
+	}
+	if t.LeftoverPIDs, err = decodeLeftoverPIDs(leftoverPIDs); err != nil {
 		return Task{}, err
 	}
 	if pid.Valid {

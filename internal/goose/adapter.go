@@ -17,6 +17,8 @@ type Launch struct {
 	Dir    string
 	// Env holds child environment overrides in "KEY=VALUE" form.
 	Env []string
+	// RecipeSHA256 is the hex SHA-256 of the recipe bytes at launch build time.
+	RecipeSHA256 string
 }
 type Config struct {
 	Binary, RecipeRoot string
@@ -51,6 +53,9 @@ type Request struct {
 	// Config.MailboxSocket, attaches the mailbox extension and forwards the
 	// token via the spawned process's environment.
 	MailboxToken string
+	// ExpectRecipeSHA256, when non-empty, makes Build fail with
+	// ErrRecipeHashMismatch unless the resolved recipe hashes to it.
+	ExpectRecipeSHA256 string
 }
 
 // Build uses an argument array. C00 proved that --path cannot be combined with
@@ -86,6 +91,13 @@ func (c Config) Build(r Request) (Launch, error) {
 	if err != nil {
 		return Launch{}, err
 	}
+	recipeSHA, err := hashFile(recipe)
+	if err != nil {
+		return Launch{}, err
+	}
+	if r.ExpectRecipeSHA256 != "" && !strings.EqualFold(r.ExpectRecipeSHA256, recipeSHA) {
+		return Launch{}, fmt.Errorf("%w: expected %s, recipe is %s", ErrRecipeHashMismatch, r.ExpectRecipeSHA256, recipeSHA)
+	}
 	// Declaration-aware validation needs the resolved allowlisted path, so it
 	// runs here — still before any process starts. Shape validation above
 	// already rejected malformed input without touching the filesystem.
@@ -117,7 +129,7 @@ func (c Config) Build(r Request) (Launch, error) {
 	args := []string{"run", "--recipe", recipe, "--no-session", "--max-turns", fmt.Sprint(c.MaxTurns), "--quiet", "--output-format", "stream-json"}
 	args = append(args, parameterArgs(r.Parameters)...)
 	// An interactive approval mode aborts tool calls in headless workers.
-	launch := Launch{Binary: c.Binary, Dir: childDir, Args: args, Env: []string{"GOOSE_MODE=auto"}}
+	launch := Launch{Binary: c.Binary, Dir: childDir, Args: args, Env: []string{"GOOSE_MODE=auto"}, RecipeSHA256: recipeSHA}
 	// Attach the mailbox and forward its token only when fully configured.
 	if c.ExtensionBinary != "" && c.MailboxSocket != "" && r.MailboxToken != "" {
 		launch.Args = append(launch.Args, "--with-extension", fmt.Sprintf("mailbox:%s --socket %s", c.ExtensionBinary, c.MailboxSocket))

@@ -2,6 +2,7 @@
 package tasks
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -87,6 +88,59 @@ type Task struct {
 	StalledMaxTurns  *bool
 	StdoutTruncated  *bool
 	BytesDropped     *int64
+
+	// Dispatch-guarantee fields (migration 007). Empty/zero/nil mean absent
+	// and are what every pre-007 row reads back as.
+	//
+	// RecipeSHA256 is the hex SHA-256 of the resolved recipe file bytes;
+	// Provider, Model and GooseVersion are the effective values observed at
+	// launch. The Expect* fields are caller expectations persisted so a
+	// queued task is still checked at launch; they are admission/launch
+	// checks, not part of idempotency equivalence.
+	RecipeSHA256       string
+	Provider           string
+	Model              string
+	GooseVersion       string
+	ExpectRecipeSHA256 string
+	ExpectProvider     string
+	ExpectModel        string
+	// TimeoutSeconds is the per-task wall-clock bound; zero means none.
+	TimeoutSeconds int
+	// LeftoverPIDs is nil when no scan ran. A non-nil empty slice with
+	// LeftoverDetection "ok" means a scan found nothing; detection
+	// "unavailable" means the platform cannot tell, never "none left".
+	LeftoverPIDs      []int
+	LeftoverDetection string
+}
+
+// Leftover detection states recorded in Task.LeftoverDetection.
+const (
+	LeftoverDetectionOK          = "ok"
+	LeftoverDetectionUnavailable = "unavailable"
+)
+
+// encodeLeftoverPIDs returns the JSON persisted for a pid list; nil is NULL.
+func encodeLeftoverPIDs(pids []int) (any, error) {
+	if pids == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(pids)
+	if err != nil {
+		return nil, fmt.Errorf("encode leftover pids: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// decodeLeftoverPIDs fails closed on a corrupt stored list.
+func decodeLeftoverPIDs(stored sql.NullString) ([]int, error) {
+	if !stored.Valid {
+		return nil, nil
+	}
+	pids := []int{}
+	if err := json.Unmarshal([]byte(stored.String), &pids); err != nil || pids == nil {
+		return nil, fmt.Errorf("decode persisted leftover pids %q", stored.String)
+	}
+	return pids, nil
 }
 
 // OutcomeSummary is the plain-primitive input to Store.RecordOutcomeSummary.

@@ -61,6 +61,10 @@ func exitResult(err error) Result {
 func (p *Process) Wait() Result       { <-p.done; return p.readResult() }
 func (p *Process) readResult() Result { p.mu.Lock(); defer p.mu.Unlock(); return p.result }
 
+// Leftovers is always unavailable on Darwin: no evidence-checked process
+// group enumeration primitive has been verified on a real Darwin host.
+func (p *Process) Leftovers() (pids []int, ok bool) { <-p.done; return nil, false }
+
 // Cancel sends TERM only after verifying that the child still leads its owned group,
 // then waits grace before escalating that same verified group to KILL.
 func (p *Process) Cancel(ctx context.Context, grace time.Duration) Result {

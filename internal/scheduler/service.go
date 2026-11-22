@@ -57,6 +57,18 @@ type ParameterValidator interface {
 	ValidateRequestWithFiles(recipe string, params, fileParams map[string]string) error
 }
 
+// RecipeHasher is optionally implemented by the validator (the launcher
+// config does). It resolves a recipe through the same allowlist as launch and
+// returns the hex SHA-256 of its bytes; NormalizeSHA256 validates expectations.
+type RecipeHasher interface {
+	RecipeSHA256(recipe string) (string, error)
+	NormalizeSHA256(s string) (string, error)
+}
+
+// ErrRecipeHashMismatch is returned at admission when expect_recipe_sha256
+// does not match the resolved recipe; no capacity is reserved and no row exists.
+var ErrRecipeHashMismatch = errors.New("recipe_sha256_mismatch")
+
 // Option configures a Service at construction.
 type Option func(*Service)
 
@@ -71,13 +83,15 @@ func WithParameterValidator(validator ParameterValidator) Option {
 type ServerInfo struct {
 	RecipeRoot, Workdir, RunsDir, GooseBinary, GooseVersion string
 	MaxTurns, MaxTurnsCeiling, MaxConcurrent                int
-	MailboxEnabled                                          bool
-	OutputLimit                                             int64
-	RunsMaxAge                                              time.Duration
-	RunsMaxCount                                            int
-	GPOVersion, GPOCommit                                   string
-	DaemonStartedAt                                         time.Time
-	Queued, Running                                         int
+	// TimeoutCeilingSeconds caps a spawn's timeout_seconds; zero means no ceiling.
+	TimeoutCeilingSeconds int
+	MailboxEnabled        bool
+	OutputLimit           int64
+	RunsMaxAge            time.Duration
+	RunsMaxCount          int
+	GPOVersion, GPOCommit string
+	DaemonStartedAt       time.Time
+	Queued, Running       int
 }
 
 func WithServerInfo(info ServerInfo) Option {
@@ -114,6 +128,17 @@ type SpawnRequest struct {
 	// before Reserve so an invalid value consumes no capacity and creates no
 	// task row.
 	InboxPolicy string
+	// ExpectRecipeSHA256, ExpectProvider and ExpectModel are optional
+	// expectations. The hash is checked at admission and again at launch;
+	// provider/model are checked against the first live stream events.
+	ExpectRecipeSHA256 string
+	ExpectProvider     string
+	ExpectModel        string
+	// TimeoutSeconds is an optional per-task wall-clock bound measured from
+	// process start; zero means none. A task exceeding it is cancelled via
+	// the normal cancel path and ends timed_out. Negative values, or values
+	// above the server ceiling, are rejected at admission.
+	TimeoutSeconds int
 }
 
 // Spawn persists and returns a queued ID without waiting for worker execution.
@@ -134,6 +159,27 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	} else if err := s.validator.ValidateRequestWithFiles(request.Recipe, request.Parameters, request.FileParameters); err != nil {
 		return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
+	expectSHA, recipeSHA := request.ExpectRecipeSHA256, ""
+	if hasher, ok := s.validator.(RecipeHasher); ok {
+		var err error
+		if expectSHA, err = hasher.NormalizeSHA256(expectSHA); err != nil {
+			return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
+		if recipeSHA, err = hasher.RecipeSHA256(request.Recipe); err != nil {
+			return tasks.Task{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
+		if expectSHA != "" && expectSHA != recipeSHA {
+			return tasks.Task{}, fmt.Errorf("%w: expected %s, recipe is %s", ErrRecipeHashMismatch, expectSHA, recipeSHA)
+		}
+	} else if expectSHA != "" {
+		return tasks.Task{}, fmt.Errorf("%w: expect_recipe_sha256 is not supported on this server", ErrInvalidRequest)
+	}
+	if request.TimeoutSeconds < 0 {
+		return tasks.Task{}, fmt.Errorf("%w: timeout_seconds must not be negative", ErrInvalidRequest)
+	}
+	if c := s.serverInfo.TimeoutCeilingSeconds; c > 0 && request.TimeoutSeconds > c {
+		return tasks.Task{}, fmt.Errorf("%w: timeout_seconds %d exceeds server ceiling %d", ErrInvalidRequest, request.TimeoutSeconds, c)
+	}
 	inboxPolicy := tasks.InboxPolicy(request.InboxPolicy)
 	if inboxPolicy != "" && !tasks.KnownInboxPolicy(inboxPolicy) {
 		return tasks.Task{}, fmt.Errorf("%w: unknown inbox_policy %q", ErrInvalidRequest, request.InboxPolicy)
@@ -141,7 +187,7 @@ func (s *Service) Spawn(ctx context.Context, request SpawnRequest) (tasks.Task, 
 	if err := s.scheduler.Reserve(); err != nil {
 		return tasks.Task{}, err
 	}
-	task, inserted, err := s.store.Create(ctx, tasks.Task{ID: s.newID(), Recipe: request.Recipe, IdempotencyKey: request.IdempotencyKey, MaxTurns: request.MaxTurns, Parameters: request.Parameters, FileParameters: request.FileParameters, InboxPolicy: inboxPolicy})
+	task, inserted, err := s.store.Create(ctx, tasks.Task{ID: s.newID(), Recipe: request.Recipe, IdempotencyKey: request.IdempotencyKey, MaxTurns: request.MaxTurns, Parameters: request.Parameters, FileParameters: request.FileParameters, InboxPolicy: inboxPolicy, RecipeSHA256: recipeSHA, ExpectRecipeSHA256: expectSHA, ExpectProvider: request.ExpectProvider, ExpectModel: request.ExpectModel, TimeoutSeconds: request.TimeoutSeconds})
 	if err != nil || !inserted {
 		s.scheduler.Release()
 		return task, err

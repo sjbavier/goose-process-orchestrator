@@ -101,8 +101,9 @@ func TestMigrateUpgradesLegacyInlineDatabasePreservingRows(t *testing.T) {
 		t.Fatalf("legacy row parameters = %v / file parameters = %v, want both nil", old.Parameters, old.FileParameters)
 	}
 	// An upgraded database must accept new parameterized writes and must treat
-	// the pre-existing row as equivalent to a no-parameter replay.
-	if _, inserted, err := store.Create(ctx, Task{ID: "new-1", Recipe: "legacy.yaml", IdempotencyKey: "legacy-key"}); err != nil || inserted {
+	// the pre-existing row as equivalent to a replay with the same max_turns and
+	// no other parameters (max_turns is part of equivalence; ADJ-1).
+	if _, inserted, err := store.Create(ctx, Task{ID: "new-1", Recipe: "legacy.yaml", IdempotencyKey: "legacy-key", MaxTurns: 7}); err != nil || inserted {
 		t.Fatalf("no-parameter replay of a legacy row = (%t, %v), want (false, nil)", inserted, err)
 	}
 	if _, _, err := store.Create(ctx, Task{ID: "new-2", Recipe: "allowed.yaml", IdempotencyKey: "k2", Parameters: map[string]string{"x": "y"}}); err != nil {

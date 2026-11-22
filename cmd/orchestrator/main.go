@@ -40,6 +40,7 @@ func main() {
 	maxConcurrent := flag.Int("max-concurrent", 20, "maximum number of spawned recipes allowed to run at the same time, for --mcp-stdio/--listen")
 	maxTurns := flag.Int("max-turns", 25, "default --max-turns passed to goose run for --mcp-stdio/--listen; a spawn's own max_turns input overrides this per task")
 	maxTurnsCeiling := flag.Int("max-turns-ceiling", 200, "hard cap on a spawn's max_turns input for --mcp-stdio/--listen, regardless of what a client requests")
+	timeoutCeiling := flag.Int("timeout-ceiling-seconds", 0, "hard cap on a spawn's timeout_seconds input for --mcp-stdio/--listen; 0 (the default) means no ceiling")
 	runsMaxAge := flag.Duration("runs-max-age", 0, "delete a finished task's run directory under --runs-dir once this much time has passed since it ended; 0 (the default) keeps run directories forever")
 	runsMaxCount := flag.Int("runs-max-count", 0, "target total number of run directories to keep under --runs-dir, newest first; 0 (the default) keeps run directories forever")
 	runsSweepInterval := flag.Duration("runs-sweep-interval", 15*time.Minute, "how often to apply --runs-max-age/--runs-max-count; only used when one of them is set")
@@ -62,6 +63,10 @@ func main() {
 	}
 	if *maxTurnsCeiling < *maxTurns {
 		fmt.Fprintln(os.Stderr, "--max-turns-ceiling must be at least --max-turns")
+		os.Exit(1)
+	}
+	if *timeoutCeiling < 0 {
+		fmt.Fprintln(os.Stderr, "--timeout-ceiling-seconds must not be negative")
 		os.Exit(1)
 	}
 	if *outputLimit < 1 {
@@ -111,6 +116,7 @@ func main() {
 		maxConcurrent:          *maxConcurrent,
 		maxTurns:               *maxTurns,
 		maxTurnsCeiling:        *maxTurnsCeiling,
+		timeoutCeilingSeconds:  *timeoutCeiling,
 		retention:              retention.Policy{MaxAge: *runsMaxAge, MaxCount: *runsMaxCount},
 		sweepInterval:          *runsSweepInterval,
 		mailboxExtensionBinary: *mailboxExtensionBinary,
@@ -178,6 +184,7 @@ func main() {
 type serverConfig struct {
 	dbPath, recipeRoot, gooseBinary, runsDir string
 	maxConcurrent, maxTurns, maxTurnsCeiling int
+	timeoutCeilingSeconds                    int
 	// retention is the run-directory retention policy. Its zero value keeps
 	// every run directory forever, which is the default and the behavior
 	// this project had before retention existed.
@@ -303,7 +310,7 @@ func newServer(config serverConfig) (server *mcp.Server, startRetention func(con
 	if startedAt.IsZero() {
 		startedAt = time.Now().UTC()
 	}
-	info := scheduler.ServerInfo{RecipeRoot: config.recipeRoot, Workdir: config.workdir, RunsDir: config.runsDir, GooseBinary: config.gooseBinary, GooseVersion: gooseVersion, MaxTurns: config.maxTurns, MaxTurnsCeiling: config.maxTurnsCeiling, MaxConcurrent: config.maxConcurrent, MailboxEnabled: config.mailboxExtensionBinary != "", OutputLimit: config.outputLimit, RunsMaxAge: config.retention.MaxAge, RunsMaxCount: config.retention.MaxCount, GPOVersion: gpoVersion, GPOCommit: gpoCommit, DaemonStartedAt: startedAt}
+	info := scheduler.ServerInfo{RecipeRoot: config.recipeRoot, Workdir: config.workdir, RunsDir: config.runsDir, GooseBinary: config.gooseBinary, GooseVersion: gooseVersion, MaxTurns: config.maxTurns, MaxTurnsCeiling: config.maxTurnsCeiling, TimeoutCeilingSeconds: config.timeoutCeilingSeconds, MaxConcurrent: config.maxConcurrent, MailboxEnabled: config.mailboxExtensionBinary != "", OutputLimit: config.outputLimit, RunsMaxAge: config.retention.MaxAge, RunsMaxCount: config.retention.MaxCount, GPOVersion: gpoVersion, GPOCommit: gpoCommit, DaemonStartedAt: startedAt}
 	// The launcher's own Config is the parameter validator, so admission and
 	// the eventual argv are governed by one contract against one recipe root.
 	service, err := scheduler.NewService(store, sched, func() string { return fmt.Sprintf("task-%d", time.Now().UTC().UnixNano()) }, config.runsDir, scheduler.WithParameterValidator(launcher.Config), scheduler.WithServerInfo(info))

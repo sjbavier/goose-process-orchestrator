@@ -41,26 +41,37 @@ type SpawnInput struct {
 	// send "") for the default controller_only policy; "open" allows any
 	// sender to message this task's inbox.
 	InboxPolicy string `json:"inbox_policy,omitempty"`
+	// ExpectRecipeSHA256 (hex) must equal the SHA-256 of the resolved recipe
+	// at admission and again at launch, else the spawn/task fails with
+	// recipe_sha256_mismatch. ExpectProvider/ExpectModel are checked against
+	// the live stream (requestedModel, not necessarily the serving model).
+	ExpectRecipeSHA256 string `json:"expect_recipe_sha256,omitempty"`
+	ExpectProvider     string `json:"expect_provider,omitempty"`
+	ExpectModel        string `json:"expect_model,omitempty"`
+	// TimeoutSeconds is an optional per-task wall-clock limit from process
+	// start; on expiry the task is cancelled and ends timed_out.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
 type ServerInfoInput struct{}
 type ServerInfoOutput struct {
-	RecipeRoot      string `json:"recipe_root"`
-	Workdir         string `json:"workdir,omitempty"`
-	RunsDir         string `json:"runs_dir"`
-	GooseBinary     string `json:"goose_binary"`
-	GooseVersion    string `json:"goose_version,omitempty"`
-	MaxTurns        int    `json:"max_turns"`
-	MaxTurnsCeiling int    `json:"max_turns_ceiling"`
-	MaxConcurrent   int    `json:"max_concurrent"`
-	Queued          int    `json:"queued"`
-	Running         int    `json:"running"`
-	MailboxEnabled  bool   `json:"mailbox_enabled"`
-	OutputLimit     int64  `json:"output_limit"`
-	RunsMaxAge      string `json:"runs_max_age"`
-	RunsMaxCount    int    `json:"runs_max_count"`
-	GPOVersion      string `json:"gpo_version,omitempty"`
-	GPOCommit       string `json:"gpo_commit,omitempty"`
-	DaemonStartedAt string `json:"daemon_started_at"`
+	RecipeRoot            string `json:"recipe_root"`
+	Workdir               string `json:"workdir,omitempty"`
+	RunsDir               string `json:"runs_dir"`
+	GooseBinary           string `json:"goose_binary"`
+	GooseVersion          string `json:"goose_version,omitempty"`
+	MaxTurns              int    `json:"max_turns"`
+	MaxTurnsCeiling       int    `json:"max_turns_ceiling"`
+	TimeoutCeilingSeconds int    `json:"timeout_ceiling_seconds,omitempty"`
+	MaxConcurrent         int    `json:"max_concurrent"`
+	Queued                int    `json:"queued"`
+	Running               int    `json:"running"`
+	MailboxEnabled        bool   `json:"mailbox_enabled"`
+	OutputLimit           int64  `json:"output_limit"`
+	RunsMaxAge            string `json:"runs_max_age"`
+	RunsMaxCount          int    `json:"runs_max_count"`
+	GPOVersion            string `json:"gpo_version,omitempty"`
+	GPOCommit             string `json:"gpo_commit,omitempty"`
+	DaemonStartedAt       string `json:"daemon_started_at"`
 }
 
 type IDInput struct {
@@ -107,6 +118,21 @@ type TaskOutput struct {
 	EndedAt             string `json:"ended_at,omitempty"`
 	StderrTail          string `json:"stderr_tail,omitempty"`
 	StderrTailTruncated bool   `json:"stderr_tail_truncated,omitempty"`
+	// RecipeSHA256 is the hash of the recipe bytes recorded for the task;
+	// Provider/Model are the effective values observed in the stream.
+	RecipeSHA256 string `json:"recipe_sha256,omitempty"`
+	// TimeoutSeconds is the per-task wall-clock limit, if one was set.
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Model          string `json:"model,omitempty"`
+	// GooseVersion is the goose binary version captured at launch.
+	GooseVersion string `json:"goose_version,omitempty"`
+	// LeftoverPIDs lists processes still alive in the task's process group
+	// after its leader exited. LeftoverDetection is "ok" (scan ran; an empty
+	// list means none), "unavailable" (platform/scan cannot tell; absence of
+	// pids is NOT evidence of none), or absent (not scanned).
+	LeftoverPIDs      []int  `json:"leftover_pids,omitempty"`
+	LeftoverDetection string `json:"leftover_detection,omitempty"`
 }
 type ListInput struct {
 	// Status, when non-empty, filters to exactly that task status.
@@ -222,6 +248,9 @@ func outcomeOutput(r scheduler.OutcomeResult) TaskOutput {
 		out.EndedAt = t.EndedAt.Format(time.RFC3339)
 	}
 	out.StderrTail, out.StderrTailTruncated = r.StderrTail, r.StderrTailTruncated
+	out.RecipeSHA256, out.Provider, out.Model = t.RecipeSHA256, t.Provider, t.Model
+	out.TimeoutSeconds = t.TimeoutSeconds
+	out.GooseVersion, out.LeftoverPIDs, out.LeftoverDetection = t.GooseVersion, t.LeftoverPIDs, t.LeftoverDetection
 	return out
 }
 func listItem(t tasks.Task) TaskListItem {
@@ -270,12 +299,12 @@ func New(service Service) (*mcp.Server, error) {
 		if e != nil {
 			return nil, ServerInfoOutput{}, fmt.Errorf("server_info: %w", e)
 		}
-		return nil, ServerInfoOutput{RecipeRoot: info.RecipeRoot, Workdir: info.Workdir, RunsDir: info.RunsDir, GooseBinary: info.GooseBinary, GooseVersion: info.GooseVersion, MaxTurns: info.MaxTurns, MaxTurnsCeiling: info.MaxTurnsCeiling, MaxConcurrent: info.MaxConcurrent, Queued: info.Queued, Running: info.Running, MailboxEnabled: info.MailboxEnabled, OutputLimit: info.OutputLimit, RunsMaxAge: info.RunsMaxAge.String(), RunsMaxCount: info.RunsMaxCount, GPOVersion: info.GPOVersion, GPOCommit: info.GPOCommit, DaemonStartedAt: info.DaemonStartedAt.Format(time.RFC3339)}, nil
+		return nil, ServerInfoOutput{RecipeRoot: info.RecipeRoot, Workdir: info.Workdir, RunsDir: info.RunsDir, GooseBinary: info.GooseBinary, GooseVersion: info.GooseVersion, MaxTurns: info.MaxTurns, MaxTurnsCeiling: info.MaxTurnsCeiling, TimeoutCeilingSeconds: info.TimeoutCeilingSeconds, MaxConcurrent: info.MaxConcurrent, Queued: info.Queued, Running: info.Running, MailboxEnabled: info.MailboxEnabled, OutputLimit: info.OutputLimit, RunsMaxAge: info.RunsMaxAge.String(), RunsMaxCount: info.RunsMaxCount, GPOVersion: info.GPOVersion, GPOCommit: info.GPOCommit, DaemonStartedAt: info.DaemonStartedAt.Format(time.RFC3339)}, nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "spawn", Description: "Queue an approved recipe. Optional max_turns overrides the server's default turn limit. Optional parameters supplies declared strings. Optional file_parameters supplies bounded UTF-8 content that is persisted unencrypted and materialized as private run files; never pass secrets. Optional inbox_policy selects \"controller_only\" (default) or \"open\"."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SpawnInput) (*mcp.CallToolResult, TaskOutput, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "spawn", Description: "Queue an approved recipe. Optional max_turns overrides the server's default turn limit. Optional timeout_seconds bounds wall-clock time from process start (status timed_out on expiry). Optional parameters supplies declared strings. Optional file_parameters supplies bounded UTF-8 content that is persisted unencrypted and materialized as private run files; never pass secrets. Optional inbox_policy selects \"controller_only\" (default) or \"open\"."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SpawnInput) (*mcp.CallToolResult, TaskOutput, error) {
 		// A client transport/request lifecycle is not task ownership. Detach only
 		// cancellation so a stdio disconnect cannot cancel a successfully queued task.
-		t, e := service.Spawn(context.WithoutCancel(ctx), scheduler.SpawnRequest{Recipe: in.Recipe, IdempotencyKey: in.IdempotencyKey, MaxTurns: in.MaxTurns, Parameters: in.Parameters, FileParameters: in.FileParameters, InboxPolicy: in.InboxPolicy})
+		t, e := service.Spawn(context.WithoutCancel(ctx), scheduler.SpawnRequest{Recipe: in.Recipe, IdempotencyKey: in.IdempotencyKey, MaxTurns: in.MaxTurns, Parameters: in.Parameters, FileParameters: in.FileParameters, InboxPolicy: in.InboxPolicy, ExpectRecipeSHA256: in.ExpectRecipeSHA256, ExpectProvider: in.ExpectProvider, ExpectModel: in.ExpectModel, TimeoutSeconds: in.TimeoutSeconds})
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("spawn: %w", e)
 		}

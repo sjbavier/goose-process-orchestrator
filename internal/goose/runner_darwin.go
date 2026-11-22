@@ -63,7 +63,7 @@ func (r Runner) Start(request Request, taskID string) (*supervisor.Process, arti
 		return nil, run, nil, err
 	}
 	parser := &logs.Incremental{StallMatcher: logs.DefaultStallMatcher}
-	live := &Live{parser: parser, stdout: out}
+	live := &Live{parser: parser, stdout: out, RecipeSHA256: launch.RecipeSHA256, GooseVersion: VersionOf(launch.Binary)}
 	p, err := supervisor.Start(launch.Binary, launch.Args, launch.Dir, launch.Env, io.MultiWriter(out, parser), errout)
 	if err != nil {
 		out.Close()
@@ -80,8 +80,12 @@ func (r Runner) Start(request Request, taskID string) (*supervisor.Process, arti
 // disk capture and the parser every byte regardless of the capture's Limit —
 // this is what lets Snapshot/Stats survive truncation.
 type Live struct {
-	parser *logs.Incremental
-	stdout *artifacts.Capture
+	// RecipeSHA256 is the hash of the recipe bytes at launch build time.
+	RecipeSHA256 string
+	// GooseVersion is the goose binary's reported version, or "" if unknown.
+	GooseVersion string
+	parser       *logs.Incremental
+	stdout       *artifacts.Capture
 }
 
 // Snapshot returns the live-parsed stdout state as of now.

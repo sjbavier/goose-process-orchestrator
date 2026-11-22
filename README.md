@@ -199,6 +199,54 @@ build metadata provides them. A failed Goose version probe leaves only
 
 `--sub-recipe` remains unsupported.
 
+#### Dispatch guarantees
+
+Optional `spawn` inputs let a caller assert what actually runs, and tasks
+report what did run:
+
+- `expect_recipe_sha256` — hex SHA-256 of the recipe file. A mismatch is
+  rejected at admission (before capacity is reserved or a row exists) and
+  re-checked at launch. A small window between hashing and Goose reading the
+  file remains (TOCTOU); the recipe root is expected to be operator-controlled.
+- `expect_provider` / `expect_model` — checked against the provider and
+  `requestedModel` Goose reports in stream-json message metadata. A mismatch
+  cancels the run and fails it with `provider_mismatch` / `model_mismatch`. A
+  clean exit that never exposed the expected values fails with
+  `expectation_unverifiable`. `requestedModel` is what was requested, not
+  necessarily what served the request.
+- `timeout_seconds` — wall-clock bound from process start, enforced through the
+  normal cancel path; expiry yields status `timed_out`. Negative values, or
+  values above the server's `--timeout-ceiling-seconds` (default `0` = no
+  ceiling, forwarded by `cmd/mcp-shim`; reported in `server_info`), are rejected
+  at admission.
+
+Omitting every expectation leaves behavior unchanged. `status`, `wait`, and
+`result` additionally report `recipe_sha256`, `provider`, `model`,
+`goose_version` (`goose --version`, cached), `timeout_seconds`,
+`leftover_pids`, and `leftover_detection`.
+
+**Leftover processes.** After a task exits, GPO scans its process group
+(Linux, via `/proc`) and reports survivors in `leftover_pids`
+(`leftover_detection: ok`). Cancel also terminates recorded survivors, signalling
+a pid only after re-verifying its identity (pid, process group, start time), so
+recycled or unrelated pids are never touched. On macOS and other platforms
+detection is `unavailable`; re-adopted processes and pre-migration rows report
+nothing.
+
+**Idempotency.** Replaying a key with an identical request returns the same
+task ID with no second launch, and concurrent identical spawns create one row.
+A differing recipe, parameters, inbox policy, `max_turns`, `timeout_seconds`, or
+`expect_*` value is `ErrIdempotencyConflict`; omitted values compare equal to
+omitted values, so legacy rows and callers that never set them are unaffected.
+Expect hashes are normalized before comparison, so case differences do not
+conflict.
+
+**`max_turns` and ACP providers.** `--max-turns` is passed for every provider,
+but whether it bounds an ACP provider's own tool loop is unproven (see
+`.goose/workflows/gpo-dispatch-guarantees/plan/findings-acp-and-events.md`).
+Treat it as best-effort for ACP providers and use `timeout_seconds` as the hard
+bound.
+
 `--max-turns-ceiling` (default `200`) hard-caps the effective `max_turns` for
 every spawn, including a client-supplied override: a request for
 `max_turns: 2000000000` is silently clamped to the ceiling, not forwarded

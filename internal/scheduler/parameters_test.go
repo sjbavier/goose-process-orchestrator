@@ -141,3 +141,45 @@ func TestSpawnValidatesParameterlessRecipeBeforeReservingCapacity(t *testing.T) 
 		t.Fatalf("rejected request left %d rows (err %v)", len(listed), listErr)
 	}
 }
+
+type hashingValidator struct {
+	recordingValidator
+	sha string
+}
+
+func (v *hashingValidator) RecipeSHA256(string) (string, error) { return v.sha, nil }
+func (v *hashingValidator) NormalizeSHA256(s string) (string, error) {
+	return strings.ToLower(s), nil
+}
+
+func TestSpawnRecipeSHAExpectation(t *testing.T) {
+	store := testStore(t)
+	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
+	defer close(runner.release)
+	sched, err := New(store, runner, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 64)
+	ids := []string{"task-1", "task-2"}
+	service, err := NewService(store, sched, func() string { id := ids[0]; ids = ids[1:]; return id }, t.TempDir(), WithParameterValidator(&hashingValidator{sha: sha}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = service.Spawn(ctx, SpawnRequest{Recipe: "r.yaml", IdempotencyKey: "k1", ExpectRecipeSHA256: strings.Repeat("b", 64)})
+	if !errors.Is(err, ErrRecipeHashMismatch) {
+		t.Fatalf("Spawn = %v, want ErrRecipeHashMismatch", err)
+	}
+	if listed, _ := service.List(ctx, "", "", 100); len(listed) != 0 {
+		t.Fatalf("mismatch left %d rows", len(listed))
+	}
+	got, err := service.Spawn(ctx, SpawnRequest{Recipe: "r.yaml", IdempotencyKey: "k2", ExpectRecipeSHA256: strings.ToUpper(sha), ExpectProvider: "p", ExpectModel: "m"})
+	if err != nil {
+		t.Fatalf("matching spawn = %v (capacity leaked by the rejection?)", err)
+	}
+	row, err := store.Get(ctx, got.ID)
+	if err != nil || row.RecipeSHA256 != sha || row.ExpectRecipeSHA256 != sha || row.ExpectProvider != "p" || row.ExpectModel != "m" {
+		t.Fatalf("row = %+v err %v", row, err)
+	}
+}
