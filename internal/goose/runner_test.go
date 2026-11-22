@@ -9,9 +9,8 @@ import (
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
 )
 
-// fakeGooseScript stands in for the real goose CLI: it only inspects the
-// --recipe path's base name and exits deterministically, never calling a
-// provider or network endpoint.
+// fakeGooseScript stands in for the real goose CLI and exits
+// deterministically without calling a provider or network endpoint.
 const fakeGooseScript = `#!/bin/sh
 recipe=""
 while [ $# -gt 0 ]; do
@@ -23,6 +22,7 @@ done
 name=$(basename "$recipe")
 case "$name" in
   quiet.yaml) echo "ok"; exit 0 ;;
+  mode.yaml) printf '%s\n' "$GOOSE_MODE"; exit 0 ;;
   big.yaml)
     i=0
     while [ $i -lt 20 ]; do
@@ -77,6 +77,32 @@ func TestStartCapturesStdoutExactlyAsBefore(t *testing.T) {
 	}
 	if string(data) != "ok\n" {
 		t.Fatalf("stdout.raw = %q, want %q", data, "ok\n")
+	}
+}
+
+func TestStartOverridesInheritedGooseMode(t *testing.T) {
+	for _, mode := range []string{"approve", "smart_approve"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("GOOSE_MODE", mode)
+			r, recipeRoot := newFakeGooseRunner(t, 1024, "mode.yaml")
+			p, run, _, err := r.Start(Request{Recipe: filepath.Join(recipeRoot, "mode.yaml")}, "task-mode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := p.Wait(); result.ExitCode != 0 {
+				t.Fatalf("exit code = %d, want 0", result.ExitCode)
+			}
+			data, err := os.ReadFile(run.StdoutPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "auto\n" {
+				t.Fatalf("worker printed GOOSE_MODE = %q, want %q", data, "auto\n")
+			}
+			if parentMode := os.Getenv("GOOSE_MODE"); parentMode != mode {
+				t.Fatalf("parent GOOSE_MODE = %q, want %q", parentMode, mode)
+			}
+		})
 	}
 }
 

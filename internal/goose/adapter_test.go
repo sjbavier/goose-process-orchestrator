@@ -70,8 +70,9 @@ func TestBuildDefaultNoSessionArgvIsUnchanged(t *testing.T) {
 	if l.Dir != wantRun {
 		t.Fatalf("Dir changed: got %q, want %q", l.Dir, wantRun)
 	}
-	if len(l.Env) != 0 {
-		t.Fatalf("default Env changed: got %#v, want empty", l.Env)
+	wantEnv := []string{"GOOSE_MODE=auto"}
+	if !slices.Equal(l.Env, wantEnv) {
+		t.Fatalf("default Env: got %#v, want %#v", l.Env, wantEnv)
 	}
 }
 
@@ -92,6 +93,7 @@ func TestBuildAttachesMailboxExtensionOnlyWhenFullyConfigured(t *testing.T) {
 		t.Fatal(e)
 	}
 	baseArgs := []string{"run", "--recipe", wantRecipe, "--no-session", "--max-turns", "25", "--quiet", "--output-format", "stream-json"}
+	baseEnv := []string{"GOOSE_MODE=auto"}
 
 	cases := []struct {
 		name   string
@@ -101,6 +103,8 @@ func TestBuildAttachesMailboxExtensionOnlyWhenFullyConfigured(t *testing.T) {
 		{"fully disabled", Config{RecipeRoot: root, MaxTurns: 25}, ""},
 		{"extension+socket configured, no token", Config{RecipeRoot: root, MaxTurns: 25, ExtensionBinary: "/opt/mailbox-extension", MailboxSocket: "/run/mailbox.sock"}, ""},
 		{"token present, extension/socket not configured", Config{RecipeRoot: root, MaxTurns: 25}, "tok-123"},
+		{"socket+token configured, no extension", Config{RecipeRoot: root, MaxTurns: 25, MailboxSocket: "/run/mailbox.sock"}, "tok-123"},
+		{"extension+token configured, no socket", Config{RecipeRoot: root, MaxTurns: 25, ExtensionBinary: "/opt/mailbox-extension"}, "tok-123"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,8 +115,8 @@ func TestBuildAttachesMailboxExtensionOnlyWhenFullyConfigured(t *testing.T) {
 			if !reflect.DeepEqual(l.Args, baseArgs) {
 				t.Fatalf("argv changed when mailbox should stay disabled:\n got:  %#v\nwant: %#v", l.Args, baseArgs)
 			}
-			if len(l.Env) != 0 {
-				t.Fatalf("Env changed when mailbox should stay disabled: got %#v", l.Env)
+			if !slices.Equal(l.Env, baseEnv) {
+				t.Fatalf("mailbox-off Env: got %#v, want %#v", l.Env, baseEnv)
 			}
 		})
 	}
@@ -127,8 +131,8 @@ func TestBuildAttachesMailboxExtensionOnlyWhenFullyConfigured(t *testing.T) {
 		if !reflect.DeepEqual(l.Args, wantArgs) {
 			t.Fatalf("mailbox-on argv:\n got:  %#v\nwant: %#v", l.Args, wantArgs)
 		}
-		wantEnv := []string{"MAILBOX_TOKEN=tok-123"}
-		if !reflect.DeepEqual(l.Env, wantEnv) {
+		wantEnv := []string{"GOOSE_MODE=auto", "MAILBOX_TOKEN=tok-123"}
+		if !slices.Equal(l.Env, wantEnv) {
 			t.Fatalf("mailbox-on env: got %#v, want %#v", l.Env, wantEnv)
 		}
 	})

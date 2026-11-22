@@ -54,6 +54,11 @@ is provided or claimed in either transport mode. Closing an MCP client is
 never itself a request to cancel an accepted task; cancellation is always
 explicit through the MCP `cancel` tool, in both modes.
 
+GPO pins `GOOSE_MODE=auto` for every spawned worker because interactive approval
+modes abort tool calls in headless sessions. The override applies only to the
+child process, so interactive Goose sessions keep their configured mode. Workers
+run with the local account's permissions.
+
 The binary's supported entry points are intentionally small:
 
 ```sh

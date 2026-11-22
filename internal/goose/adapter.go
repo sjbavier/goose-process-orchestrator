@@ -15,10 +15,7 @@ type Launch struct {
 	Binary string
 	Args   []string
 	Dir    string
-	// Env holds extra environment variables (each "KEY=VALUE") to add on top
-	// of the spawned process's inherited environment. Empty (the common
-	// case) means "inherit only" — the mailbox token is the only current
-	// user of this.
+	// Env holds child environment overrides in "KEY=VALUE" form.
 	Env []string
 }
 type Config struct {
@@ -52,9 +49,7 @@ type Request struct {
 	MaxTurns int
 	// MailboxToken, when non-empty alongside Config.ExtensionBinary and
 	// Config.MailboxSocket, attaches the mailbox extension and forwards the
-	// token via the spawned process's environment. Empty (the common case,
-	// and the only possibility when the server has no Tokens registry)
-	// leaves argv and env exactly as before this field existed.
+	// token via the spawned process's environment.
 	MailboxToken string
 }
 
@@ -121,15 +116,12 @@ func (c Config) Build(r Request) (Launch, error) {
 	}
 	args := []string{"run", "--recipe", recipe, "--no-session", "--max-turns", fmt.Sprint(c.MaxTurns), "--quiet", "--output-format", "stream-json"}
 	args = append(args, parameterArgs(r.Parameters)...)
-	launch := Launch{Binary: c.Binary, Dir: childDir, Args: args}
-	// Both Config fields and the request's token must be present: a token
-	// with no configured extension/socket (should not happen, but fail
-	// closed rather than attach nothing yet still leak an unused env var)
-	// and a configured extension with no token (mailbox disabled for this
-	// server) both leave argv/env exactly as before this feature existed.
+	// An interactive approval mode aborts tool calls in headless workers.
+	launch := Launch{Binary: c.Binary, Dir: childDir, Args: args, Env: []string{"GOOSE_MODE=auto"}}
+	// Attach the mailbox and forward its token only when fully configured.
 	if c.ExtensionBinary != "" && c.MailboxSocket != "" && r.MailboxToken != "" {
 		launch.Args = append(launch.Args, "--with-extension", fmt.Sprintf("mailbox:%s --socket %s", c.ExtensionBinary, c.MailboxSocket))
-		launch.Env = []string{"MAILBOX_TOKEN=" + r.MailboxToken}
+		launch.Env = append(launch.Env, "MAILBOX_TOKEN="+r.MailboxToken)
 	}
 	return launch, nil
 }
