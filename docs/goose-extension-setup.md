@@ -87,6 +87,12 @@ Replace every `/home/YOU/...` path with the real absolute paths from steps 1-2. 
 
 This env var is scoped to the orchestrator daemon process and propagates to every `goose run` child it spawns (Go's `exec.Command` inherits the parent's environment when `Env` isn't set explicitly, and neither the shim nor the orchestrator override it) — it does **not** touch your own interactive Goose session, which keeps whatever `GOOSE_MODE` it already had. It is also all-or-nothing per daemon instance: there is no per-task override, so every task anyone spawns through this one orchestrator process runs under the same mode.
 
+**Confining unattended workers (optional).** Because workers run unattended in auto mode, an operator may confine them by passing a wrapper script as `--goose-binary`. The wrapper (`goose-sandboxed`) execs the real `goose` under bubblewrap with identical arguments and environment. Only the task's `repo_root`, the run directory, and goose/provider state are writable; `$HOME` is otherwise an empty tmpfs. GPO itself is unchanged.
+
+Limits: the network is shared (no network filtering), provider credentials remain visible to the worker, and this is Linux only. It is not a complete security boundary. After any daemon restart, check `server_info.goose_binary`: an auto-starting MCP shim reuses its baked-in flags, so the wrapper may not be the binary in use.
+
+Details live in the projects repository (https://github.com/sjbavier/projects): `.goose/scripts/goose-sandboxed`, `.goose/scripts/goose-sandboxed-selftest`, and `.goose/workflows/gpo-sandbox.md`.
+
 **Option B — `goose configure` interactively**, if a human is doing this: run `goose configure`, choose "Add Extension" → "Command-line Extension", and supply the same `cmd`/`args` as above when prompted.
 
 ## 5. Restart to pick it up

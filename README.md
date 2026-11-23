@@ -59,6 +59,25 @@ modes abort tool calls in headless sessions. The override applies only to the
 child process, so interactive Goose sessions keep their configured mode. Workers
 run with the local account's permissions.
 
+#### Sandboxing workers (optional)
+
+Because workers run unattended in auto mode, an operator may confine them by
+passing a wrapper script as `--goose-binary`. The wrapper (`goose-sandboxed`)
+execs the real `goose` under bubblewrap with identical arguments and
+environment. Only the task's `repo_root`, the run directory, and goose/provider
+state are writable; `$HOME` is otherwise an empty tmpfs. GPO itself is unchanged.
+
+Limits: the network is shared (no network filtering), provider credentials
+remain visible to the worker, and this is Linux only. It is not a complete
+security boundary.
+
+After any daemon restart, check `server_info.goose_binary`: an auto-starting MCP
+shim reuses its baked-in flags, so the wrapper may not be the binary in use.
+
+Details live in the projects repository (https://github.com/sjbavier/projects):
+`.goose/scripts/goose-sandboxed`, `.goose/scripts/goose-sandboxed-selftest`, and
+`.goose/workflows/gpo-sandbox.md`.
+
 The binary's supported entry points are intentionally small:
 
 ```sh
