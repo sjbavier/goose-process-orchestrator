@@ -18,6 +18,7 @@ import (
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
 	"github.com/local/goose-process-orchestrator/internal/mailbox"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
+	"github.com/local/goose-process-orchestrator/internal/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -179,7 +180,7 @@ func pollStatus(t *testing.T, ctx context.Context, session *mcp.ClientSession, i
 func TestSocketServingSurvivesConnectionClose(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 
@@ -241,7 +242,7 @@ func TestSocketServingSurvivesConnectionClose(t *testing.T) {
 func TestMaxConcurrentAllowsParallelTasks(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 
@@ -312,7 +313,7 @@ func TestMaxConcurrentAllowsParallelTasks(t *testing.T) {
 func TestMaxTurnsDefaultAndPerSpawnOverride(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 	observedPath := filepath.Join(recipeRoot, "observed-max-turns.txt")
@@ -382,10 +383,10 @@ func TestMaxTurnsDefaultAndPerSpawnOverride(t *testing.T) {
 func TestMailboxAttachesExtensionAndForwardsToken(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
-	mailboxSocket := filepath.Join(dir, "mailbox.sock")
+	mailboxSocket := testutil.ShortSocketPath(t, "mailbox.sock")
 	observedPath := filepath.Join(recipeRoot, "observed-mailbox.txt")
 
 	config := testConfig(dbPath, recipeRoot, gooseBinary, runsDir, 20)
@@ -461,10 +462,10 @@ func TestMailboxAttachesExtensionAndForwardsToken(t *testing.T) {
 func TestMailboxEndToEndCheckpointDeliveryAndInboxPolicy(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
-	mailboxSocket := filepath.Join(dir, "mailbox.sock")
+	mailboxSocket := testutil.ShortSocketPath(t, "mailbox.sock")
 
 	config := testConfig(dbPath, recipeRoot, gooseBinary, runsDir, 20)
 	config.mailboxExtensionBinary = gooseBinary // any accessible regular file; fakegoose never execs it
@@ -605,12 +606,60 @@ func TestMailboxEndToEndCheckpointDeliveryAndInboxPolicy(t *testing.T) {
 	}
 }
 
+func TestBindOrDialWrappedBindErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		darwin   bool
+		bindErr  error
+		liveAt   int
+		want     error
+		attempts int
+	}{
+		{"Darwin retry finds live owner", true, syscall.EEXIST, 1, errAlreadyOwned, 2},
+		{"Darwin final bind finds live owner", true, syscall.EEXIST, 3, errAlreadyOwned, 3},
+		{"Darwin unrelated error", true, syscall.EACCES, 0, syscall.EACCES, 1},
+		{"Linux EEXIST", false, syscall.EEXIST, 1, syscall.EEXIST, 1},
+		{"Linux final address in use", false, syscall.EADDRINUSE, 3, syscall.EADDRINUSE, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socketPath := testutil.ShortSocketPath(t, "orch.sock")
+			if tc.liveAt == 3 {
+				stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				stale.SetUnlinkOnClose(false)
+				if err := stale.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			attempts := 0
+			listen := func(path string) (net.Listener, error) {
+				attempts++
+				if attempts == tc.liveAt {
+					owner, err := net.Listen("unix", path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { owner.Close() })
+				}
+				return nil, &net.OpError{Op: "listen", Net: "unix", Err: os.NewSyscallError("bind", tc.bindErr)}
+			}
+			_, err := bindOrDialWithListen(socketPath, listen, tc.darwin)
+			if !errors.Is(err, tc.want) || attempts != tc.attempts {
+				t.Fatalf("bindOrDial = %v after %d attempts, want %v after %d", err, attempts, tc.want, tc.attempts)
+			}
+		})
+	}
+}
+
 // TestBindOrDialConcurrentStartExactlyOneOwner proves C02's first focused
 // check: when several callers race to bind the same socket path concurrently,
 // exactly one gets a real listener and every other one cleanly reports
 // errAlreadyOwned rather than a bind error or a second independent listener.
 func TestBindOrDialConcurrentStartExactlyOneOwner(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 
 	const racers = 8
 	type outcome struct {
@@ -655,7 +704,7 @@ func TestBindOrDialConcurrentStartExactlyOneOwner(t *testing.T) {
 // it (the out-of-scope crash case) is detected as unconnectable and replaced,
 // rather than permanently blocking every future start attempt.
 func TestBindOrDialRecoversStaleSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -693,7 +742,7 @@ func TestBindOrDialRecoversStaleSocket(t *testing.T) {
 // decide the socket is stale and race to remove+re-bind, letting one delete
 // the other's freshly bound, live socket. Exactly one must win.
 func TestBindOrDialConcurrentStaleRecoveryExactlyOneOwner(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -792,7 +841,7 @@ func TestRetentionFlagValidationRejectsBadInput(t *testing.T) {
 func TestOutputLimitCapsCaptureWithoutReachingGooseArgv(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	runsDir := filepath.Join(dir, "runs")
 
 	const limit = 1024
@@ -852,7 +901,7 @@ func TestOutputLimitCapsCaptureWithoutReachingGooseArgv(t *testing.T) {
 func TestRetentionSweepRemovesAgedTerminalRunDir(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 
@@ -1002,7 +1051,7 @@ func TestBindOrDialNeverExposesGroupOrOtherPermissions(t *testing.T) {
 	old := syscall.Umask(0) // simulate the loosest plausible inherited umask
 	defer syscall.Umask(old)
 
-	socketPath := filepath.Join(t.TempDir(), "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	ln, err := bindOrDial(socketPath)
 	if err != nil {
 		t.Fatal(err)

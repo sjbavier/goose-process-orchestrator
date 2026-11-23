@@ -4,29 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/local/goose-process-orchestrator/internal/mailbox"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
+	"github.com/local/goose-process-orchestrator/internal/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
-
-// shortSocketDir returns a fresh directory created directly under /tmp,
-// rather than t.TempDir() (which nests under a long test-name-derived path),
-// so a "mailbox.sock" joined onto it stays under the 104-byte sun_path limit
-// macOS enforces (see CR-019).
-func shortSocketDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gpo-test-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
 
 // openTestEnv builds a real migrated SQLite-backed tasks.Store, a mailbox
 // listener serving it, and a token minted for "task-a" — the same
@@ -53,7 +39,7 @@ func openTestEnv(t *testing.T) (socket, token string) {
 		t.Fatalf("set task-a open: %v", err)
 	}
 
-	socket = filepath.Join(shortSocketDir(t), "mailbox.sock")
+	socket = testutil.ShortSocketPath(t, "mailbox.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

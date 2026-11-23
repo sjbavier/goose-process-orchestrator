@@ -38,15 +38,30 @@ func testStore(t *testing.T) *tasks.Store {
 	return tasks.NewStore(db)
 }
 
+// testScheduler owns the workers so cleanup can drain dispatch and join them
+// before closing SQLite or deleting fixture directories. Register runner
+// release after this helper if the runner blocks.
+func testScheduler(t *testing.T, store *tasks.Store, runner Runner, workers, capacity int) *Scheduler {
+	t.Helper()
+	s := newScheduler(store, runner, capacity)
+	var workersDone sync.WaitGroup
+	for range workers {
+		workersDone.Go(s.worker)
+	}
+	t.Cleanup(func() {
+		close(s.jobs)
+		workersDone.Wait()
+	})
+	return s
+}
+
 func newService(t *testing.T, store *tasks.Store, runner Runner, workers, capacity int) *Service {
 	t.Helper()
-	s, err := New(store, runner, workers, capacity)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runsRoot := t.TempDir()
+	s := testScheduler(t, store, runner, workers, capacity)
 	var mu sync.Mutex
 	n := 0
-	returnService, err := NewService(store, s, func() string { mu.Lock(); defer mu.Unlock(); n++; return "task-" + string(rune('0'+n)) }, t.TempDir())
+	returnService, err := NewService(store, s, func() string { mu.Lock(); defer mu.Unlock(); n++; return "task-" + string(rune('0'+n)) }, runsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +72,7 @@ func TestServiceRejectsInvalidAndOverCapacityRequests(t *testing.T) {
 	store := testStore(t)
 	runner := &blockingRunner{started: make(chan tasks.Task, 1), release: make(chan struct{})}
 	service := newService(t, store, runner, 1, 1)
+	t.Cleanup(func() { close(runner.release) })
 	if _, err := service.Spawn(context.Background(), SpawnRequest{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid Spawn: %v", err)
 	}
@@ -70,13 +86,13 @@ func TestServiceRejectsInvalidAndOverCapacityRequests(t *testing.T) {
 	if _, err := service.Spawn(context.Background(), SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "three"}); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("over-capacity Spawn: %v", err)
 	}
-	close(runner.release)
 }
 
 func TestServiceSpawnValidatesInboxPolicyBeforeReserve(t *testing.T) {
 	store := testStore(t)
 	runner := &blockingRunner{started: make(chan tasks.Task, 1), release: make(chan struct{})}
 	service := newService(t, store, runner, 1, 1)
+	t.Cleanup(func() { close(runner.release) })
 	if _, err := service.Spawn(context.Background(), SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "one", InboxPolicy: "bogus"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid inbox_policy: %v", err)
 	}
@@ -97,13 +113,13 @@ func TestServiceSpawnValidatesInboxPolicyBeforeReserve(t *testing.T) {
 	if stored.InboxPolicy != tasks.OpenInbox {
 		t.Fatalf("stored InboxPolicy = %q, want %q", stored.InboxPolicy, tasks.OpenInbox)
 	}
-	close(runner.release)
 }
 
 func TestServiceSpawnIsImmediateAndRequestCancellationDoesNotCancelWork(t *testing.T) {
 	store := testStore(t)
 	runner := &blockingRunner{started: make(chan tasks.Task, 1), release: make(chan struct{})}
 	service := newService(t, store, runner, 1, 1)
+	t.Cleanup(func() { close(runner.release) })
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
 	task, err := service.Spawn(ctx, SpawnRequest{Recipe: "allowed.yaml", IdempotencyKey: "one"})
@@ -122,7 +138,6 @@ func TestServiceSpawnIsImmediateAndRequestCancellationDoesNotCancelWork(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("worker was cancelled with the request context")
 	}
-	close(runner.release)
 }
 
 func TestServiceReadsPersistedStatusAndDelegatesExplicitCancel(t *testing.T) {

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/local/goose-process-orchestrator/internal/tasks"
 )
 
 // recordingValidator stands in for the launcher's Config. It records what it
@@ -28,14 +26,10 @@ func (v *recordingValidator) ValidateRequestWithFiles(recipe string, params, fil
 
 func TestSpawnValidatesParametersBeforeReservingCapacity(t *testing.T) {
 	store := testStore(t)
-	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
-	defer close(runner.release)
-	sched, err := New(store, runner, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, nil, 1, 1)
 	validator := &recordingValidator{err: errors.New("declaration rejected")}
-	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(validator))
+	service, err := NewService(store, sched, func() string { return "task-1" }, runsRoot, WithParameterValidator(validator))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +57,9 @@ func TestSpawnValidatesParametersBeforeReservingCapacity(t *testing.T) {
 
 func TestSpawnPersistsValidatedParameters(t *testing.T) {
 	store := testStore(t)
-	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
-	defer close(runner.release)
-	sched, err := New(store, runner, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(&recordingValidator{}))
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, nil, 1, 1)
+	service, err := NewService(store, sched, func() string { return "task-1" }, runsRoot, WithParameterValidator(&recordingValidator{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,13 +81,9 @@ func TestSpawnPersistsValidatedParameters(t *testing.T) {
 // validator refuses parameters instead of admitting unvalidated input.
 func TestSpawnWithoutAValidatorFailsClosed(t *testing.T) {
 	store := testStore(t)
-	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
-	defer close(runner.release)
-	sched, err := New(store, runner, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir())
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, nil, 1, 1)
+	service, err := NewService(store, sched, func() string { return "task-1" }, runsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,14 +103,10 @@ func errorsContains(err error, substring string) bool {
 
 func TestSpawnValidatesParameterlessRecipeBeforeReservingCapacity(t *testing.T) {
 	store := testStore(t)
-	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
-	defer close(runner.release)
-	sched, err := New(store, runner, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, nil, 1, 1)
 	validator := &recordingValidator{err: errors.New("recipe has no prompt; headless goose run requires one")}
-	service, err := NewService(store, sched, func() string { return "task-1" }, t.TempDir(), WithParameterValidator(validator))
+	service, err := NewService(store, sched, func() string { return "task-1" }, runsRoot, WithParameterValidator(validator))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,15 +136,11 @@ func (v *hashingValidator) NormalizeSHA256(s string) (string, error) {
 
 func TestSpawnRecipeSHAExpectation(t *testing.T) {
 	store := testStore(t)
-	runner := &blockingRunner{started: make(chan tasks.Task, 4), release: make(chan struct{})}
-	defer close(runner.release)
-	sched, err := New(store, runner, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, nil, 1, 1)
 	sha := strings.Repeat("a", 64)
 	ids := []string{"task-1", "task-2"}
-	service, err := NewService(store, sched, func() string { id := ids[0]; ids = ids[1:]; return id }, t.TempDir(), WithParameterValidator(&hashingValidator{sha: sha}))
+	service, err := NewService(store, sched, func() string { id := ids[0]; ids = ids[1:]; return id }, runsRoot, WithParameterValidator(&hashingValidator{sha: sha}))
 	if err != nil {
 		t.Fatal(err)
 	}

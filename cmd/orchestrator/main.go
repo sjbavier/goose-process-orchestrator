@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -438,11 +439,19 @@ func validateSocketPathLength(socketPath string) error {
 }
 
 func bindOrDial(socketPath string) (net.Listener, error) {
-	listener, err := listenUnixRestricted(socketPath)
+	return bindOrDialWithListen(socketPath, listenUnixRestricted, runtime.GOOS == "darwin")
+}
+
+func bindOrDialWithListen(socketPath string, listen func(string) (net.Listener, error), darwin bool) (net.Listener, error) {
+	// Darwin can report EEXIST when two binds race to create the socket.
+	addressTaken := func(err error) bool {
+		return errors.Is(err, syscall.EADDRINUSE) || (darwin && errors.Is(err, syscall.EEXIST))
+	}
+	listener, err := listen(socketPath)
 	if err == nil {
 		return listener, nil
 	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !addressTaken(err) {
 		return nil, fmt.Errorf("listen on %q: %w", socketPath, err)
 	}
 
@@ -459,11 +468,11 @@ func bindOrDial(socketPath string) (net.Listener, error) {
 
 	// Re-check under the lock: whoever held it before us may have already
 	// removed the stale socket and rebound.
-	listener, err = listenUnixRestricted(socketPath)
+	listener, err = listen(socketPath)
 	if err == nil {
 		return listener, nil
 	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !addressTaken(err) {
 		return nil, fmt.Errorf("listen on %q: %w", socketPath, err)
 	}
 	if dialAlive(socketPath) {
@@ -475,8 +484,11 @@ func bindOrDial(socketPath string) (net.Listener, error) {
 	if rmErr := os.Remove(socketPath); rmErr != nil && !os.IsNotExist(rmErr) {
 		return nil, fmt.Errorf("remove stale socket %q: %w", socketPath, rmErr)
 	}
-	listener, err = listenUnixRestricted(socketPath)
+	listener, err = listen(socketPath)
 	if err != nil {
+		if darwin && addressTaken(err) && dialAlive(socketPath) {
+			return nil, errAlreadyOwned
+		}
 		return nil, fmt.Errorf("listen on %q after removing stale socket: %w", socketPath, err)
 	}
 	return listener, nil

@@ -33,11 +33,15 @@ func New(store Claimer, runner Runner, workers, queueCapacity int) (*Scheduler, 
 	if store == nil || workers < 1 || queueCapacity < 1 {
 		return nil, errors.New("store, at least one worker, and positive queue capacity are required")
 	}
-	s := &Scheduler{store: store, runner: runner, jobs: make(chan struct{}, queueCapacity), slots: make(chan struct{}, queueCapacity)}
+	s := newScheduler(store, runner, queueCapacity)
 	for range workers {
 		go s.worker()
 	}
 	return s, nil
+}
+
+func newScheduler(store Claimer, runner Runner, queueCapacity int) *Scheduler {
+	return &Scheduler{store: store, runner: runner, jobs: make(chan struct{}, queueCapacity), slots: make(chan struct{}, queueCapacity)}
 }
 
 // Reserve admits one new request without blocking. Release must be called if

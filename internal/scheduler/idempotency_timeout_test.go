@@ -27,13 +27,11 @@ func idempotencyService(t *testing.T, workers, capacity int, opts ...Option) (*S
 	t.Helper()
 	store := testStore(t)
 	runner := &countingRunner{release: make(chan struct{})}
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, runner, workers, capacity)
 	t.Cleanup(func() { close(runner.release) })
-	sched, err := New(store, runner, workers, capacity)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var n atomic.Int32
-	service, err := NewService(store, sched, func() string { return "task-" + string(rune('a'+n.Add(1))) }, t.TempDir(), opts...)
+	service, err := NewService(store, sched, func() string { return "task-" + string(rune('a'+n.Add(1))) }, runsRoot, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,14 +147,12 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestSpawnReplayWithDifferentCaseExpectHashIsSameTask(t *testing.T) {
 	store := testStore(t)
 	runner := &countingRunner{release: make(chan struct{})}
+	runsRoot := t.TempDir()
+	sched := testScheduler(t, store, runner, 2, 4)
 	t.Cleanup(func() { close(runner.release) })
-	sched, err := New(store, runner, 2, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var n atomic.Int32
 	sha := strings.Repeat("a", 64)
-	service, err := NewService(store, sched, func() string { return "task-" + string(rune('a'+n.Add(1))) }, t.TempDir(), WithParameterValidator(&hashingValidator{sha: sha}))
+	service, err := NewService(store, sched, func() string { return "task-" + string(rune('a'+n.Add(1))) }, runsRoot, WithParameterValidator(&hashingValidator{sha: sha}))
 	if err != nil {
 		t.Fatal(err)
 	}

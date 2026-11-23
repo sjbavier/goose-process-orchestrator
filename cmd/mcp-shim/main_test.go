@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/local/goose-process-orchestrator/internal/artifacts"
+	"github.com/local/goose-process-orchestrator/internal/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -270,7 +271,7 @@ func TestOutputLimitValidationRejectsNonPositive(t *testing.T) {
 func TestAutoStartsOrchestratorAndRelays(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 	orch := orchestratorBinary(t)
@@ -311,7 +312,7 @@ func TestAutoStartsOrchestratorAndRelays(t *testing.T) {
 func TestSecondShimReusesRunningOrchestrator(t *testing.T) {
 	gooseBinary, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	dbPath := filepath.Join(dir, "orchestrator.db")
 	runsDir := filepath.Join(dir, "runs")
 	orch := orchestratorBinary(t)

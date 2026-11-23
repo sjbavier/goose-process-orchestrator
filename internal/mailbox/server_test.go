@@ -4,28 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/local/goose-process-orchestrator/internal/tasks"
+	"github.com/local/goose-process-orchestrator/internal/testutil"
 	_ "modernc.org/sqlite"
 )
-
-// shortSocketDir returns a fresh directory created directly under /tmp,
-// rather than t.TempDir() (which nests under a long test-name-derived path),
-// so a "mailbox.sock" joined onto it stays under the 104-byte sun_path limit
-// macOS enforces (see CR-019).
-func shortSocketDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gpo-test-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
 
 // openTestStore builds a real migrated SQLite-backed tasks.Store, so this
 // package's server/client round trip is proven against the actual
@@ -55,8 +41,7 @@ func openTestStore(t *testing.T) (*tasks.Store, *sql.DB) {
 
 func startServer(t *testing.T, tokens *Tokens, store Store) (socket string) {
 	t.Helper()
-	dir := shortSocketDir(t)
-	socket = filepath.Join(dir, "mailbox.sock")
+	socket = testutil.ShortSocketPath(t, "mailbox.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

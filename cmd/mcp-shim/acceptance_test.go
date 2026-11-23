@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/local/goose-process-orchestrator/internal/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -26,7 +27,7 @@ func newShimFixture(t *testing.T) shimFixture {
 	t.Helper()
 	gooseBin, recipeRoot := newFakeGoose(t)
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "orch.sock")
+	socketPath := testutil.ShortSocketPath(t, "orch.sock")
 	t.Cleanup(func() { killOrchestratorFor(socketPath) })
 	return shimFixture{
 		shimBin:    shimBinary(t),
