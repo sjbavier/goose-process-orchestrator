@@ -1,0 +1,2 @@
+{"type":"message","message":{"id":"stall","role":"assistant","content":[{"type":"error","kind":"resourceExhausted","message":"I've reached the maximum number of actions I can do without user input. Would you like me to continue?"}]}}
+{"type":"error","error":"I've reached the maximum number of actions I can do without user input. Would you like me to continue?"}

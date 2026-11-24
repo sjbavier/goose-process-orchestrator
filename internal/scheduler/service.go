@@ -493,10 +493,7 @@ func (s *Service) Progress(ctx context.Context, id string) (ProgressResult, erro
 
 // OutcomeResult is the combined "what happened" view status/result need,
 // built from the task row plus a best-effort run-directory lookup. Outcome
-// is computed here (not stored on the row, see internal/orchestrator's
-// outcomeSummaryFromLive comment) because the correct terminal status is
-// only known once the task is actually terminal, which this method's caller
-// always has.
+// combines the persisted summary with the task's terminal status.
 type OutcomeResult struct {
 	Task tasks.Task
 	// RunDir is best-effort: empty if the run directory is gone (e.g. swept
@@ -522,13 +519,18 @@ func outcomeFromTask(t tasks.Task) string {
 	switch t.Status {
 	case tasks.Succeeded:
 		if t.StalledMaxTurns != nil && *t.StalledMaxTurns {
-			return "stalled_max_turns"
+			return tasks.OutcomeStalledMaxTurns
 		}
 		if t.CompleteSeen != nil && *t.CompleteSeen {
 			return "completed"
 		}
 		return "no_complete_event"
-	case tasks.Failed, tasks.TimedOut:
+	case tasks.Failed:
+		if t.Outcome == tasks.OutcomeStalledMaxTurns {
+			return tasks.OutcomeStalledMaxTurns
+		}
+		return "process_failed"
+	case tasks.TimedOut:
 		return "process_failed"
 	default:
 		return ""
@@ -536,9 +538,8 @@ func outcomeFromTask(t tasks.Task) string {
 }
 
 // Outcome assembles the status/result tool response: the task row itself,
-// its outcome classification, a best-effort run directory, and (only when
-// Outcome is "process_failed" and the run directory is still available) a
-// bounded stderr tail, reusing logs.Tail exactly as the logs tool does.
+// its outcome classification, a best-effort run directory, and a bounded
+// stderr tail for failed or timed-out tasks with a run directory.
 func (s *Service) Outcome(ctx context.Context, id string) (OutcomeResult, error) {
 	task, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -556,7 +557,7 @@ func (s *Service) Outcome(ctx context.Context, id string) (OutcomeResult, error)
 		return result, nil
 	}
 	result.RunDir = run.Dir
-	if result.Outcome == "process_failed" {
+	if task.Status == tasks.Failed || task.Status == tasks.TimedOut {
 		if data, truncated, terr := logs.Tail(run.StderrPath, logs.DefaultStderrTailBytes); terr == nil {
 			result.StderrTail, result.StderrTailTruncated = string(data), truncated
 		}

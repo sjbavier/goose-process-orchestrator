@@ -221,8 +221,8 @@ func (r *Runner) awaitAndReport(ctx context.Context, id string, p handle, result
 	// terminal status without whatever live summary this process produced.
 	if live != nil {
 		live.Flush()
-		r.flushLiveSummary(ctx, id, live)
 		failure = r.recordEffective(ctx, id, live, expect, failure, result)
+		r.flushLiveSummary(ctx, id, live, failure == "" && !result.Cancelled && result.ExitCode > 0)
 	}
 
 	r.recordLeftovers(ctx, id, p)
@@ -287,7 +287,7 @@ func (r *Runner) await(ctx context.Context, id string, p handle, live *goose.Liv
 		case <-ticker.C:
 			ticks++
 			if live != nil && ticks%flushEveryNTicks == 0 {
-				r.flushLiveSummary(ctx, id, live)
+				r.flushLiveSummary(ctx, id, live, false)
 			}
 			if live != nil && expect.set() {
 				snap := live.Snapshot()
@@ -333,19 +333,16 @@ func (r *Runner) recordEffective(ctx context.Context, id string, live *goose.Liv
 // flushLiveSummary persists live's current snapshot and capture stats,
 // logging rather than failing the caller if the write itself errors — the
 // same tolerance report already has for its own Transition call.
-func (r *Runner) flushLiveSummary(ctx context.Context, id string, live *goose.Live) {
-	if _, err := r.Store.RecordOutcomeSummary(ctx, id, outcomeSummaryFromLive(live)); err != nil {
+func (r *Runner) flushLiveSummary(ctx context.Context, id string, live *goose.Live, failedExit bool) {
+	if _, err := r.Store.RecordOutcomeSummary(ctx, id, outcomeSummaryFromLive(live, failedExit)); err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrator: task %s: record outcome summary: %v\n", id, err)
 	}
 }
 
 // outcomeSummaryFromLive translates a goose.Live snapshot (logs.Snapshot)
 // plus its capture stats into the plain-primitive tasks.OutcomeSummary that
-// Store.RecordOutcomeSummary persists. Outcome itself is deliberately left
-// empty: it is computed from status + CompleteSeen + StalledMaxTurns by the
-// scheduler.Service method that reads these columns back, not stored here,
-// because the correct status (Succeeded/Failed/TimedOut) is not yet known at
-// every point this function runs (a periodic flush happens mid-run).
+// Store.RecordOutcomeSummary persists. Persist a failed stall only after the
+// process exits nonzero on its own and the stream confirms a max-turns error.
 //
 // FinalTextTruncated is a best-effort inference, not a field the parser
 // reports directly: Incremental caps assistant text at exactly
@@ -354,12 +351,17 @@ func (r *Runner) flushLiveSummary(ctx context.Context, id string, live *goose.Li
 // a real message whose length happens to match the cap exactly, never
 // false-negative, matching this feature's documented "under-detect, never
 // over-claim" posture for inferred signals.
-func outcomeSummaryFromLive(live *goose.Live) tasks.OutcomeSummary {
+func outcomeSummaryFromLive(live *goose.Live, failedExit bool) tasks.OutcomeSummary {
 	snap := live.Snapshot()
 	_, dropped, truncated := live.Stats()
+	var outcome string
+	if failedExit && snap.StallErrorSeen {
+		outcome = tasks.OutcomeStalledMaxTurns
+	}
 	return tasks.OutcomeSummary{
 		FinalText:          snap.LastAssistantText,
 		FinalTextTruncated: len(snap.LastAssistantText) >= logs.MaxAssistantTextBytes,
+		Outcome:            outcome,
 		CompleteSeen:       snap.Complete,
 		TotalTokens:        snap.TotalTokens,
 		InputTokens:        snap.InputTokens,
@@ -369,7 +371,7 @@ func outcomeSummaryFromLive(live *goose.Live) tasks.OutcomeSummary {
 		CostUSD:            snap.CostUSD,
 		ToolCallCount:      int64(snap.ToolCallCount),
 		LastEventAt:        snap.LastEventAt,
-		StalledMaxTurns:    snap.StalledMaxTurns,
+		StalledMaxTurns:    snap.StalledMaxTurns || outcome == tasks.OutcomeStalledMaxTurns,
 		StdoutTruncated:    truncated,
 		BytesDropped:       dropped,
 	}

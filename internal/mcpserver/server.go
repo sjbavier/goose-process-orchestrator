@@ -310,14 +310,14 @@ func New(service Service) (*mcp.Server, error) {
 		}
 		return nil, output(t), nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "status", Description: "Read task status, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail appears only when outcome is \"process_failed\" and the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "status", Description: "Read task status, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail may appear for failed or timed-out tasks when the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
 		r, e := service.Outcome(ctx, in.ID)
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("status: %w", e)
 		}
 		return nil, outcomeOutput(r), nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "result", Description: "Read task result, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail appears only when outcome is \"process_failed\" and the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "result", Description: "Read task result, including run_dir, final_text, outcome, exit_code, failure, and timestamps once available. outcome is one of \"completed\", \"stalled_max_turns\", \"no_complete_event\", or \"process_failed\" once terminal; absent otherwise. stderr_tail may appear for failed or timed-out tasks when the run directory is still available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in IDInput) (*mcp.CallToolResult, TaskOutput, error) {
 		r, e := service.Outcome(ctx, in.ID)
 		if e != nil {
 			return nil, TaskOutput{}, fmt.Errorf("result: %w", e)

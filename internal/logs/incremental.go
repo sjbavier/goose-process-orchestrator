@@ -35,6 +35,8 @@ type Snapshot struct {
 	// StalledMaxTurns latches true once StallMatcher has matched the final
 	// assistant text. It is false when no matcher is configured.
 	StalledMaxTurns bool
+	// StallErrorSeen records a max-turns diagnostic from a Goose error event.
+	StallErrorSeen bool
 }
 
 // Incremental is a stateful, concurrency-safe counterpart to ParseProgress
@@ -53,8 +55,7 @@ type Incremental struct {
 	// max-turns stop message. modelGenerated is true when any fragment of
 	// that text carried metadata.inference, so a model reply that merely
 	// quotes the phrase can be told apart from Goose's own injected message.
-	// Nil (the default) never matches: no confirmed real sample of that
-	// message exists in this repository, so nothing is matched on a guess.
+	// Nil (the default) disables matching assistant text.
 	StallMatcher func(finalAssistantText string, modelGenerated bool) bool
 
 	mu            sync.Mutex
@@ -144,8 +145,9 @@ func (i *Incremental) stamp() {
 
 func (i *Incremental) handleLine(line []byte) {
 	var envelope struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
+		Type  string          `json:"type"`
+		ID    string          `json:"id"`
+		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(line, &envelope); err != nil {
 		return
@@ -161,6 +163,9 @@ func (i *Incremental) handleLine(line []byte) {
 		for _, c := range msg.Message.Content {
 			if c.Type == "toolRequest" {
 				i.countToolRequest(c.ID)
+			}
+			if msg.Message.Role == "assistant" && c.Type == "error" && c.Kind == "resourceExhausted" && matchesStallDiagnostic(c.Message) {
+				i.snap.StallErrorSeen = true
 			}
 		}
 		if msg.Message.Role != "assistant" {
@@ -178,6 +183,12 @@ func (i *Incremental) handleLine(line []byte) {
 	case "toolRequest":
 		i.stamp()
 		i.countToolRequest(envelope.ID)
+	case "error":
+		var message string
+		if json.Unmarshal(envelope.Error, &message) == nil && matchesStallDiagnostic(message) {
+			i.snap.StallErrorSeen = true
+			i.stamp()
+		}
 	}
 }
 

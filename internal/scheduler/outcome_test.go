@@ -69,9 +69,12 @@ func TestOutcomeClassifiesPerSemanticsTable(t *testing.T) {
 		{"succeeded, present, complete_seen=0, no stall", "t-incomplete", tasks.Succeeded, &tasks.OutcomeSummary{CompleteSeen: false}, "no_complete_event"},
 		{"succeeded, absent (reconciled/pre-migration)", "t-absent", tasks.Succeeded, nil, "no_complete_event"},
 		{"failed, any", "t-failed", tasks.Failed, &tasks.OutcomeSummary{CompleteSeen: false}, "process_failed"},
+		{"failed, legacy text marker", "t-failed-legacy", tasks.Failed, &tasks.OutcomeSummary{StalledMaxTurns: true}, "process_failed"},
 		{"failed, absent", "t-failed-absent", tasks.Failed, nil, "process_failed"},
 		{"timed out", "t-timedout", tasks.TimedOut, nil, "process_failed"},
+		{"timed out with stall evidence", "t-timedout-stall", tasks.TimedOut, &tasks.OutcomeSummary{Outcome: tasks.OutcomeStalledMaxTurns}, "process_failed"},
 		{"cancelled: not one of the four buckets", "t-cancelled", tasks.Cancelled, nil, ""},
+		{"cancelled with stall evidence", "t-cancelled-stall", tasks.Cancelled, &tasks.OutcomeSummary{Outcome: tasks.OutcomeStalledMaxTurns}, ""},
 		{"running: non-terminal", "t-running", tasks.Running, nil, ""},
 	}
 	for _, c := range cases {

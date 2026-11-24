@@ -34,7 +34,7 @@ const MaxProgressReadBytes int64 = 1024 * 1024
 // Progress ever carries.
 const MaxAssistantTextBytes = 4000
 
-// DefaultStderrTailBytes bounds the stderr tail a "process_failed" outcome
+// DefaultStderrTailBytes bounds the stderr tail a failed or timed-out task
 // carries: generous enough to show a real failure, small enough not to
 // duplicate what the dedicated logs tool is for.
 const DefaultStderrTailBytes int64 = 4 * 1024
@@ -122,9 +122,11 @@ type messageEvent struct {
 		ID      string `json:"id"`
 		Role    string `json:"role"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-			ID   string `json:"id"`
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+			ID      string `json:"id"`
+			Kind    string `json:"kind"`
+			Message string `json:"message"`
 		} `json:"content"`
 		Metadata struct {
 			Inference struct {

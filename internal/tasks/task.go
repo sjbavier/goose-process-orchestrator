@@ -72,9 +72,8 @@ type Task struct {
 	FinalText          string
 	FinalTextTruncated *bool
 	// Outcome is one of "completed", "stalled_max_turns",
-	// "no_complete_event", "process_failed", or "" (absent — never derived
-	// lazily; a caller computes its own exit-code-only fallback for absent
-	// rows instead of this field guessing one).
+	// "no_complete_event", "process_failed", or "" when absent. New runs
+	// record this field for nonzero exits with a confirmed max-turns error.
 	Outcome          string
 	CompleteSeen     *bool
 	TotalTokens      *int64
@@ -112,6 +111,8 @@ type Task struct {
 	LeftoverPIDs      []int
 	LeftoverDetection string
 }
+
+const OutcomeStalledMaxTurns = "stalled_max_turns"
 
 // Leftover detection states recorded in Task.LeftoverDetection.
 const (
