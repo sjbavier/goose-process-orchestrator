@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/local/goose-process-orchestrator/internal/logs"
 	"github.com/local/goose-process-orchestrator/internal/scheduler"
 	"github.com/local/goose-process-orchestrator/internal/tasks"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -16,6 +17,7 @@ type Service interface {
 	Cancel(context.Context, string) (tasks.Task, error)
 	List(ctx context.Context, status, keyPrefix string, limit int) ([]tasks.Task, error)
 	Logs(ctx context.Context, id, stream string, maxBytes int) (scheduler.LogsResult, error)
+	LogsPage(ctx context.Context, id, stream string, maxBytes int, cursor int64) (logs.Page, error)
 	Progress(ctx context.Context, id string) (scheduler.ProgressResult, error)
 	Outcome(ctx context.Context, id string) (scheduler.OutcomeResult, error)
 	Wait(ctx context.Context, ids []string, mode string, timeout time.Duration) (scheduler.WaitResult, error)
@@ -157,22 +159,18 @@ type ListOutput struct {
 	Tasks []TaskListItem `json:"tasks"`
 }
 type LogsInput struct {
-	ID string `json:"id"`
-	// Stream selects "stdout", "stderr", or "" / "both" (default both).
-	Stream string `json:"stream,omitempty"`
-	// MaxBytes bounds the tail returned per stream; non-positive or
-	// omitted means the server default (logs.DefaultTailBytes), and any
-	// value is still capped at the server-side maximum
-	// (logs.MaxTailBytes) regardless of what is requested.
-	MaxBytes int `json:"max_bytes,omitempty"`
+	ID       string `json:"id"`
+	Stream   string `json:"stream,omitempty"`
+	MaxBytes int    `json:"max_bytes,omitempty"`
+	Cursor   *int64 `json:"cursor,omitempty"`
 }
 type LogsOutput struct {
-	Stdout string `json:"stdout,omitempty"`
-	// StdoutTruncated is true when bytes before Stdout were dropped
-	// because the captured stream was larger than the bound applied.
-	StdoutTruncated bool   `json:"stdout_truncated"`
-	Stderr          string `json:"stderr,omitempty"`
-	StderrTruncated bool   `json:"stderr_truncated"`
+	Stdout          *string `json:"stdout,omitempty"`
+	StdoutTruncated *bool   `json:"stdout_truncated,omitempty"`
+	Stderr          *string `json:"stderr,omitempty"`
+	StderrTruncated *bool   `json:"stderr_truncated,omitempty"`
+	NextCursor      *int64  `json:"next_cursor,omitempty"`
+	MoreAvailable   *bool   `json:"more_available,omitempty"`
 }
 
 // SendMessageInput never carries a sender: the controller's own connection
@@ -265,7 +263,14 @@ func listItem(t tasks.Task) TaskListItem {
 	}
 }
 func logsOutput(r scheduler.LogsResult) LogsOutput {
-	return LogsOutput{Stdout: r.Stdout, StdoutTruncated: r.StdoutTruncated, Stderr: r.Stderr, StderrTruncated: r.StderrTruncated}
+	out := LogsOutput{StdoutTruncated: &r.StdoutTruncated, StderrTruncated: &r.StderrTruncated}
+	if r.Stdout != "" {
+		out.Stdout = &r.Stdout
+	}
+	if r.Stderr != "" {
+		out.Stderr = &r.Stderr
+	}
+	return out
 }
 func progressOutput(p scheduler.ProgressResult) ProgressOutput {
 	out := ProgressOutput{
@@ -356,7 +361,36 @@ func New(service Service) (*mcp.Server, error) {
 		}
 		return nil, ListOutput{Tasks: items}, nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "logs", Description: "Read a bounded tail of a task's captured stdout/stderr. Output may contain anything the recipe or model wrote, including secrets if the recipe was authored carelessly; this tool does not filter it."}, func(ctx context.Context, _ *mcp.CallToolRequest, in LogsInput) (*mcp.CallToolResult, LogsOutput, error) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "logs",
+		Description: "Read a bounded tail of captured stdout/stderr, or page one stream in order with a byte cursor. Captured output may contain secrets and is returned without redaction.",
+		// An optional *int64 distinguishes an absent cursor from zero in Go.
+		// The schema requires an integer when present, so null is rejected.
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":        map[string]any{"type": "string"},
+				"stream":    map[string]any{"type": "string", "description": "stdout or stderr. Tail mode also accepts both (default)."},
+				"max_bytes": map[string]any{"type": "integer", "description": "Bytes per stream. Defaults to and is capped at 65536. Cursor pages can exceed a tiny limit to return one whole UTF-8 character."},
+				"cursor":    map[string]any{"type": "integer", "minimum": 0, "description": "Captured byte offset. Use 0 for the first page, then next_cursor for the same task and stream. Omit for a tail."},
+			},
+			"required":             []string{"id"},
+			"additionalProperties": false,
+		},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in LogsInput) (*mcp.CallToolResult, LogsOutput, error) {
+		if in.Cursor != nil {
+			page, err := service.LogsPage(ctx, in.ID, in.Stream, in.MaxBytes, *in.Cursor)
+			if err != nil {
+				return nil, LogsOutput{}, fmt.Errorf("logs: %w", err)
+			}
+			out := LogsOutput{NextCursor: &page.NextCursor, MoreAvailable: &page.MoreAvailable}
+			if in.Stream == "stdout" {
+				out.Stdout = &page.Text
+			} else {
+				out.Stderr = &page.Text
+			}
+			return nil, out, nil
+		}
 		r, e := service.Logs(ctx, in.ID, in.Stream, in.MaxBytes)
 		if e != nil {
 			return nil, LogsOutput{}, fmt.Errorf("logs: %w", e)

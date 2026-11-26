@@ -401,8 +401,8 @@ type LogsResult struct {
 // Logs returns a bounded tail of a task's stdout.raw/stderr.raw, located by
 // id without any stored run-directory reference (artifacts.Manager.FindRun).
 // stream selects "stdout", "stderr", or "" / "both" (default both).
-// maxBytes <= 0 defaults to logs.DefaultTailBytes; any value is clamped to
-// logs.MaxTailBytes per stream. Returns tasks.ErrNotFound for an unknown id,
+// maxBytes <= 0 uses logs.MaxTailBytes; larger values are clamped to that
+// limit per stream. Returns tasks.ErrNotFound for an unknown id,
 // or an error wrapping artifacts.ErrRunNotFound — with a message
 // distinguishing "never started" from "run directory no longer available"
 // (e.g. swept by retention) — for a known task with no run directory.
@@ -412,11 +412,8 @@ func (s *Service) Logs(ctx context.Context, id, stream string, maxBytes int) (Lo
 	default:
 		return LogsResult{}, ErrInvalidStream
 	}
-	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
+	run, err := s.findRun(ctx, id)
 	if err != nil {
-		if errors.Is(err, artifacts.ErrRunNotFound) {
-			return LogsResult{}, s.runUnavailableError(ctx, id)
-		}
 		return LogsResult{}, err
 	}
 	limit := int64(maxBytes)
@@ -436,6 +433,30 @@ func (s *Service) Logs(ctx context.Context, id, stream string, maxBytes int) (Lo
 		result.Stderr, result.StderrTruncated = string(data), truncated
 	}
 	return result, nil
+}
+
+// LogsPage reads one selected stream at a raw byte offset.
+func (s *Service) LogsPage(ctx context.Context, id, stream string, maxBytes int, cursor int64) (logs.Page, error) {
+	if stream != "stdout" && stream != "stderr" {
+		return logs.Page{}, fmt.Errorf("cursor mode requires stream \"stdout\" or \"stderr\"")
+	}
+	run, err := s.findRun(ctx, id)
+	if err != nil {
+		return logs.Page{}, err
+	}
+	path := run.StdoutPath
+	if stream == "stderr" {
+		path = run.StderrPath
+	}
+	return logs.ReadPage(path, cursor, int64(maxBytes))
+}
+
+func (s *Service) findRun(ctx context.Context, id string) (artifacts.Run, error) {
+	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
+	if errors.Is(err, artifacts.ErrRunNotFound) {
+		return artifacts.Run{}, s.runUnavailableError(ctx, id)
+	}
+	return run, err
 }
 
 // ProgressResult extends logs.ParseProgress's on-demand re-parse with the
@@ -460,11 +481,8 @@ type ProgressResult struct {
 // documented message_event_count caveat. Returns the same errors as Logs
 // under the same conditions.
 func (s *Service) Progress(ctx context.Context, id string) (ProgressResult, error) {
-	run, err := artifacts.Manager{Root: s.runsRoot}.FindRun(id)
+	run, err := s.findRun(ctx, id)
 	if err != nil {
-		if errors.Is(err, artifacts.ErrRunNotFound) {
-			return ProgressResult{}, s.runUnavailableError(ctx, id)
-		}
 		return ProgressResult{}, err
 	}
 	raw, err := logs.ReadBounded(run.StdoutPath, logs.MaxProgressReadBytes)

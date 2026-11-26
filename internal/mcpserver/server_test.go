@@ -48,6 +48,9 @@ func (f *fakeService) List(_ context.Context, status, keyPrefix string, limit in
 func (f *fakeService) Logs(context.Context, string, string, int) (scheduler.LogsResult, error) {
 	return scheduler.LogsResult{Stdout: "fake stdout", Stderr: "fake stderr"}, nil
 }
+func (f *fakeService) LogsPage(context.Context, string, string, int, int64) (logs.Page, error) {
+	return logs.Page{}, nil
+}
 func (f *fakeService) Progress(context.Context, string) (scheduler.ProgressResult, error) {
 	return scheduler.ProgressResult{Progress: logs.Progress{MessageEventCount: 1, LastAssistantText: "fake progress"}}, nil
 }

@@ -6,7 +6,7 @@ A local MCP task server with SQLite-backed task records, bounded scheduling, and
 
 The server exposes only the typed `server_info`, `spawn`, `status`, `result`, `wait`, `cancel`, `list`, `logs`, `progress`, and `send_message` tools, in both transport modes. `spawn` starts an actual owned OS process via `internal/orchestrator`'s adapter against an allowlisted `goose run` recipe, and `cancel` reaches that process's owned group, not just its database row. `list` is read-only: it returns tasks newest first, with an optional `status` filter and a `limit` capped at a server-side maximum, so a client that lost a task ID (chat compaction, a new session, a different client) can rediscover it without direct SQLite access. `send_message` queues an instruction for a running task's inbox, delivered at its next checkpoint — see "Task mailbox" below.
 
-`logs` and `progress` are also read-only, and work while a task is still running, not only after it finishes: `logs` returns a bounded tail of the task's captured `stdout.raw`/`stderr.raw`, and `progress` defensively parses that same stdout stream (`goose run --output-format stream-json`) into a message-event count, the last assistant text seen, provider/model, and tokens/cost once a `complete` event has been seen. Both locate the task's run directory by its on-disk naming convention (`<runs-dir>/<task-id>-<random>/`) rather than any stored path, so no schema change was needed. See "Using tasks from an MCP client" below for the message-event-count caveat and the secret-leakage warning.
+`logs` and `progress` are also read-only, and work while a task is still running, not only after it finishes: `logs` reads a bounded tail or a cursor page of the task's captured `stdout.raw`/`stderr.raw`, and `progress` defensively parses that same stdout stream (`goose run --output-format stream-json`) into a message-event count, the last assistant text seen, provider/model, and tokens/cost once a `complete` event has been seen. Both locate the task's run directory by its on-disk naming convention (`<runs-dir>/<task-id>-<random>/`) rather than any stored path, so no schema change was needed. See "Using tasks from an MCP client" below for the message-event-count caveat and the secret-leakage warning.
 
 In **stdio mode**, closing the client ends the server process entirely; the task set does not survive that. In **socket mode** (`--listen`, via `cmd/mcp-shim`), closing one client connection only ends that connection — the orchestrator process, its task records, and its live process registry keep running, and a new client reaching the same socket sees the same tasks and can still cancel them. This is the one capability socket mode adds over stdio mode; everything else about the task model is identical.
 
@@ -110,7 +110,7 @@ go run ./cmd/orchestrator --listen /path/to/orchestrator.sock \
 
 `--max-turns-ceiling` (default `200`) is a hard cap on any single `spawn`'s `max_turns` input, regardless of what a client requests.
 
-`--output-limit` (default `8388608`, 8 MiB) caps how many bytes of a spawned recipe's stdout are captured to its run directory's `stdout.raw`. Output past the cap is still read and counted but not stored, and `progress` reports `stdout_truncated`/`bytes_dropped` when that happened. The cap does **not** affect what a task reports: `final_text`, `outcome`, the token/cost totals, and `tool_call_count` are parsed from the full live stream as it arrives, so they stay correct for a run whose output far exceeds the cap. Must be positive — there is deliberately no "unlimited" setting, since an unbounded capture lets one runaway recipe fill the disk — and a non-positive value fails at startup before any task is accepted, the same way `--workdir` and `--mailbox-extension-binary` do.
+`--output-limit` (default `8388608`, 8 MiB) caps each captured stream separately in the run directory's `stdout.raw` and `stderr.raw`. Output past the cap is still drained and counted. For stdout, `progress` reports `stdout_truncated` and `bytes_dropped` when the cap drops bytes. The live parser reads the full stdout stream to derive `final_text`, `outcome`, token and cost totals, and `tool_call_count` even when the capture reaches its cap. Must be positive — there is deliberately no "unlimited" setting, since an unbounded capture lets one runaway recipe fill the disk — and a non-positive value fails at startup before any task is accepted, the same way `--workdir` and `--mailbox-extension-binary` do.
 
 `--workdir` (default empty) overrides every spawned `goose run` child's working directory, which otherwise defaults to the task's own isolated run directory under `--runs-dir`. This matters for a recipe authored to assume a real project checkout as its cwd (relative paths like `./src/...` or `.config/...`); set `--workdir /path/to/that/checkout` so every spawn runs there instead. Only the child's cwd changes — `logs`/`progress`/retention still use the task's own run directory for captured `stdout`/`stderr`, since those paths are already absolute. Validated at startup (must be an accessible directory) the same way `--mailbox-extension-binary` is, so a bad path fails before any task is ever accepted. Leaving it empty keeps today's exact behavior.
 
@@ -592,14 +592,46 @@ owns the tasks. A normal operator flow is:
    "Run-directory retention" above for the opt-in sweep), call `logs` with
    that task ID to read a bounded tail of its captured output:
    `{"id": ..., "stream": "stdout"|"stderr"|"both" (default both), "max_bytes": ...}`.
-   `max_bytes` defaults to 8 KiB per stream and is capped at 64 KiB per
-   stream regardless of what is requested; a response also reports whether
-   each stream was truncated. **Warning:** this is raw captured output —
+   `max_bytes` defaults to 64 KiB per stream when omitted or non-positive
+   and is capped at 64 KiB per stream. The response also reports whether
+   each stream's captured tail was truncated. **Warning:** this is raw
+   captured output —
    model text and stderr can contain anything the recipe or model wrote,
    including secrets if the recipe was authored carelessly. Neither this
    tool nor `progress` filters or redacts it, and retention deletes it on the
    same schedule as everything else in the run directory — it is not a
    secret-redaction mechanism.
+
+   To read the capture in order, include a non-negative integer `cursor`
+   and select exactly one stream, `stdout` or `stderr`. Start with zero.
+
+   ```json
+   {"id":"task-123","stream":"stdout","cursor":0,"max_bytes":4096}
+   ```
+
+   If the response gives `next_cursor: 4096`, resume with that value for the
+   same task and stream.
+
+   ```json
+   {"id":"task-123","stream":"stdout","cursor":4096,"max_bytes":4096}
+   ```
+
+   Each page returns the selected stream's text, `next_cursor`, and
+   `more_available`. Keep a separate cursor for each task and stream. The
+   offset counts raw bytes consumed. Pages keep complete UTF-8 characters
+   together, so a page can end before its byte limit. A tiny positive limit
+   can return one whole character up to four bytes to advance the cursor.
+   Malformed bytes and incomplete characters at captured EOF produce
+   replacement characters. This can happen if a read catches a partial
+   write or if the capture reaches its size limit mid-character.
+
+   At captured EOF the selected stream is empty, `next_cursor` stays the
+   same, and `more_available` is false. A missing stream file is empty at
+   zero. A cursor beyond the captured end is an error. A running task can
+   append bytes after captured EOF, so retry with the same cursor to see
+   new output and use `status` or `wait` to check task completion. Paging
+   can only return bytes retained by `--output-limit` (8 MiB by default per
+   stream) and available under the run-directory retention policy.
 6. Call `progress` with a task ID for a defensively parsed summary of that
    same output: `message_event_count`, `last_assistant_text` (bounded),
    `provider`, `model`, and, once a `complete` event has been seen,

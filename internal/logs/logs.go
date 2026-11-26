@@ -10,19 +10,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
-// DefaultTailBytes is the tail size logs returns per stream when a caller
-// does not specify one.
-const DefaultTailBytes int64 = 8 * 1024
-
-// MaxTailBytes is the server-side maximum tail size per stream, regardless
-// of what a caller requests. It stays below artifacts.DefaultOutputLimit
-// (256 KiB) so this read path can only shrink, never grow, what the
-// capture writer already retained.
+// MaxTailBytes is the default and maximum logs read size per stream.
 const MaxTailBytes int64 = 64 * 1024
 
 // MaxProgressReadBytes bounds how much of a captured stream ParseProgress's
@@ -73,6 +68,69 @@ func Tail(path string, maxBytes int64) (data []byte, truncated bool, err error) 
 		return nil, false, err
 	}
 	return data, truncated, nil
+}
+
+// Page is a decoded capture range and the raw byte offset to resume from.
+type Page struct {
+	Text          string
+	NextCursor    int64
+	MoreAvailable bool
+}
+
+// ReadPage reads a bounded range from the capture size observed on open.
+// A page ends on a rune boundary. If a tiny limit cannot fit the first
+// rune, the page still includes that rune so the cursor can advance.
+func ReadPage(path string, cursor, maxBytes int64) (Page, error) {
+	if cursor < 0 {
+		return Page{}, fmt.Errorf("cursor must be non-negative")
+	}
+	if maxBytes <= 0 || maxBytes > MaxTailBytes {
+		maxBytes = MaxTailBytes
+	}
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		if cursor == 0 {
+			return Page{}, nil
+		}
+		return Page{}, fmt.Errorf("cursor %d is beyond captured end (0)", cursor)
+	}
+	if err != nil {
+		return Page{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return Page{}, err
+	}
+	size := info.Size()
+	if cursor > size {
+		return Page{}, fmt.Errorf("cursor %d is beyond captured end (%d)", cursor, size)
+	}
+	if cursor == size {
+		return Page{NextCursor: cursor}, nil
+	}
+
+	raw := make([]byte, min(size-cursor, max(maxBytes, utf8.UTFMax)))
+	if _, err := f.ReadAt(raw, cursor); err != nil {
+		return Page{}, err
+	}
+
+	moreAfterRead := int64(len(raw)) < size-cursor
+	var text strings.Builder
+	next := cursor
+	for len(raw) > 0 {
+		if moreAfterRead && !utf8.FullRune(raw) {
+			break
+		}
+		r, consumed := utf8.DecodeRune(raw)
+		if text.Len() > 0 && int64(text.Len()+utf8.RuneLen(r)) > maxBytes {
+			break
+		}
+		text.WriteRune(r)
+		next += int64(consumed)
+		raw = raw[consumed:]
+	}
+	return Page{Text: text.String(), NextCursor: next, MoreAvailable: next < size}, nil
 }
 
 // ReadBounded reads up to maxBytes from the start of path. A missing file
